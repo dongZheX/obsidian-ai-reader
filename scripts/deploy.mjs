@@ -5,7 +5,7 @@ import { cpSync, mkdirSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
-const dest = process.argv[2] || join(homedir(), "dongzhe-md/.obsidian/plugins/obsidian-ai-reader");
+const dest = process.argv[2] || join(homedir(), "dongzhe-md/.obsidian/plugins/ai-reader");
 mkdirSync(dest, { recursive: true });
 for (const f of ["manifest.json", "main.js", "styles.css"]) {
   if (!existsSync(f)) { console.error("missing " + f + " — run `npm run build` first"); process.exit(1); }

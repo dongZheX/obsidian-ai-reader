@@ -15,12 +15,14 @@ the tool-calling agent is `src/agent.ts`. Tests: `node test/sim.js` → `ALL OK`
   there for any new pure logic — it's the only automated safety net.
 - **Typecheck + build:** `npm run build` (runs `tsc -noEmit` then esbuild).
 - **Deploy for live testing:** `npm run deploy` COPIES `manifest.json` +
-  `main.js` + `styles.css` into `~/dongzhe-md/.obsidian/plugins/obsidian-ai-reader`.
+  `main.js` + `styles.css` into `~/dongzhe-md/.obsidian/plugins/ai-reader`
+  (folder name must equal the manifest `id`, which is `ai-reader` — NOT the repo
+  name `obsidian-ai-reader`; community-plugin ids may not contain "obsidian").
   Do NOT symlink the repo as the plugin folder — Obsidian does not discover
   symlinked plugin dirs (`app.plugins.manifests` stays empty). After `npm run
   build && npm run deploy`, reload with the CLI:
   ```bash
-  /usr/local/bin/obsidian eval code="app.plugins.disablePlugin('obsidian-ai-reader').then(()=>app.plugins.enablePlugin('obsidian-ai-reader'))"
+  /usr/local/bin/obsidian eval code="app.plugins.disablePlugin('ai-reader').then(()=>app.plugins.enablePlugin('ai-reader'))"
   /usr/local/bin/obsidian dev:errors
   ```
   (The `obsidian` CLI drives the running app: `eval`, `dev:errors`,
