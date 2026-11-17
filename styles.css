@@ -148,5 +148,10 @@
 .air-sel-mini { display: inline-flex; align-items: center; cursor: pointer; padding: 4px 10px; border-radius: 7px; font-size: 11.5px; font-weight: 600; color: var(--air-accent, #3b7ddd); border: 1px solid var(--air-border, rgba(127,127,127,.2)); }
 .air-sel-mini:hover { background: var(--air-accent, #3b7ddd); color: #fff; }
 
+/* model-drawn diagrams (inline SVG / HTML artifacts) */
+.air-artifact { margin: 8px 0; border: 1px solid var(--air-border); border-radius: 8px; overflow: auto; background: #fff; max-width: 100%; padding: 6px; }
+.air-artifact svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.air-artifact-src { font-family: var(--font-monospace, monospace); font-size: 11px; white-space: pre-wrap; color: var(--air-muted); }
+
 /* the AI-written highlight inside notes (reading view) */
 mark.air-hl { border-radius: 2px; padding: 0 1px; }

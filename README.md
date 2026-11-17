@@ -33,6 +33,7 @@ grounded in the actual document. Two things make it more than a chat box:
 | **AI highlights/notes** | The model proposes highlights/notes; apply with one click as colour-coded `<mark>` + `%%` comment written into the note. `✕` removes it. |
 | **Agentic read & annotate** | One click (**✨ 通读并标注**) sends a tool-calling agent through the whole note, applying category-coloured highlights — contribution (yellow), method (green), result (blue), limitation (red), key term (purple) — de-duplicated, with a live log and one-click **undo**. |
 | **Figure vision** | Embedded images (`![[fig.png]]`) are sent to a multimodal model instead of reading only the caption. |
+| **AI-drawn diagrams** | The model can illustrate flows/architecture/timelines by emitting a `svg` block, rendered inline as a sanitized vector image (`<script>`/`on*`/`javascript:` stripped). `mermaid` blocks render via Obsidian natively. |
 | **Web search & fetch** | Tools the model can call mid-answer: `web_search` (Google via Serper — set a Serper key) and `web_fetch` (read any page, always available) for background, latest work, or term definitions beyond the document. |
 | **Selection popup** | Select text in the editor to quote it to the sidebar, explain it (streaming, grounded), or translate it — plus right-click menu entries. |
 | **Your notes as context** | Reads your existing `==highlights==` / `<mark>` / `%%comments%%` so you can ask "summarize my highlights". |

@@ -64,6 +64,7 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   // ---- retrieval ----
   const ctx = m.buildRetrievedContext(blocks, "transformer training", 60000);
   ok(/\[B\d+ L\d+\]/.test(ctx), "retrieved context tags blocks with [B# L#]");
+  ok(/```svg/.test(new m.LLM(() => m.DEFAULT_SETTINGS).systemPrompt("CTX", "中文")), "system prompt tells the model it can draw ```svg diagrams");
   const bounded = m.buildContextBounded(blocks, 60000);
   ok(bounded.includes("[B"), "bounded context produced");
 

@@ -48,6 +48,54 @@ export async function renderAssistant(container: HTMLElement, text: string, ctx:
 
   await MarkdownRenderer.render(ctx.app, masked, container, ctx.sourcePath, ctx.component);
   swapPlaceholders(container, tokens, ctx);
+  renderArtifacts(container);
+}
+
+// ---- model-drawn diagrams (svg / html) ----
+// The model is steered (system prompt rule 6) to emit a ```svg block for
+// flowcharts / architecture / timelines; here we replace that fenced block with
+// the inline vector image, after a sanitize pass (strip script/iframe/on*/
+// javascript: but keep <style> for fidelity). Ported from zotero-ai-reader's
+// _renderArtifacts. Mermaid, if emitted, is left to Obsidian's native renderer.
+const ARTIFACT_KIND: Record<string, "svg" | "html"> = { "language-svg": "svg", "language-xml": "svg", "language-html": "html" };
+
+export function renderArtifacts(root: HTMLElement): void {
+  let codes: NodeListOf<Element>;
+  try { codes = root.querySelectorAll("pre > code"); } catch (e) { return; }
+  Array.from(codes).forEach((code) => {
+    let kind: "svg" | "html" | null = null;
+    for (const cls of ((code.className || "") + "").split(/\s+/)) if (ARTIFACT_KIND[cls]) { kind = ARTIFACT_KIND[cls]; break; }
+    if (!kind) return;
+    const src = code.textContent || "";
+    if (kind === "svg" && !/<svg[\s>]/i.test(src)) return;
+    if (kind === "html" && !/[<&]/.test(src)) return;
+    const pre = code.parentElement;
+    if (!pre || !pre.parentElement) return;
+    try {
+      const wrap = document.createElement("div");
+      wrap.className = "air-artifact air-artifact-" + kind;
+      const parsed = new DOMParser().parseFromString(src, kind === "svg" ? "image/svg+xml" : "text/html");
+      const nodes: Node[] = kind === "svg"
+        ? (parsed.querySelector("svg") ? [parsed.querySelector("svg") as Node] : [])
+        : Array.from(parsed.body.childNodes);
+      for (const n of nodes) wrap.appendChild(document.importNode(n, true));
+      sanitizeArtifact(wrap);
+      if (wrap.childNodes.length) pre.parentElement.replaceChild(wrap, pre);
+    } catch (e) { /* leave the source block on any failure */ }
+  });
+}
+
+function sanitizeArtifact(root: HTMLElement): void {
+  try {
+    root.querySelectorAll("script,iframe,object,embed,link,meta,base,form,input,button,foreignObject").forEach((n) => n.remove());
+    root.querySelectorAll("*").forEach((el) => {
+      for (const a of Array.from(el.attributes)) {
+        const n = a.name.toLowerCase();
+        if (n.startsWith("on")) el.removeAttribute(a.name);
+        if ((n === "href" || n === "src" || n === "xlink:href") && /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
+      }
+    });
+  } catch (e) {}
 }
 
 function swapPlaceholders(root: HTMLElement, tokens: Token[], ctx: RenderCtx) {
