@@ -13,8 +13,17 @@ export class LLM {
   private s() { return this.getSettings(); }
 
   fmt(): ApiFormat {
-    const f = (this.s().apiFormat || "chat").trim() as ApiFormat;
-    return (["chat", "responses", "anthropic"] as string[]).includes(f) ? f : "chat";
+    const f = (this.s().apiFormat || "auto").trim();
+    if ((["chat", "responses", "anthropic"] as string[]).includes(f)) return f as ApiFormat; // explicit choice wins
+    return this.autoFmt(this.s().model); // "auto" → pick by model name
+  }
+
+  // Pick an API format from the model name (ported from _autoFmt).
+  autoFmt(model: string): ApiFormat {
+    const m = (model || "").toLowerCase();
+    if (/claude/.test(m)) return "anthropic";
+    if (/\bgpt\b|gpt-|^o[1-9]|\bo[1-9]-|openai|davinci|text-(davinci|embedding)/.test(m)) return "responses";
+    return "chat";
   }
 
   // bare host -> append /v1; upgrade remote http -> https (keep localhost http).
@@ -268,7 +277,15 @@ export class LLM {
       "5) 若正文前附有【用户在笔记中的高亮与批注】，当用户问到『我的高亮/批注』时请优先结合这些内容回答。\n" +
       "6) 需要用图示说明（流程、架构、时间线、关系等）时，请输出一个 ```svg 代码块，会被内联渲染成矢量图。要点：用 <rect>/<text>/<line>/<path>/<polygon> 等手绘，给根 <svg> 设置 width/height 和 viewBox；框与文字不要重叠、箭头对齐、整体宽度不超过约 560；颜色柔和、克制，别套用 AI 默认审美（米色+衬线、紫蓝渐变、处处居中/圆角、无谓编号）；不要用 emoji。也可用 ```mermaid（Obsidian 原生渲染）。仅在确实有助于理解时才画。\n\n" +
       this.styleGuide() +
+      this.customPromptBlock() +
       "正文内容：\n\n" + ctx;
+  }
+
+  // User-defined extra instructions from settings (appended, never replacing the
+  // citation/tool/drawing rules). Ported from _customPrompt.
+  customPromptBlock(): string {
+    const c = (this.s().customPrompt || "").trim();
+    return c ? "【用户自定义要求】（在不破坏上述引用/工具/画图规则的前提下遵循）\n" + c + "\n\n" : "";
   }
 
   // Style constraints so answers read human-written, not model-generic.

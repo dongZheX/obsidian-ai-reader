@@ -24,6 +24,8 @@ export interface ToolCtx {
   run: { keys: string[]; applied: any[] };
   tally: Record<string, number>;
   reads: number;
+  maxReads?: number;
+  maxAnn?: number;
   // platform ops:
   highlight: (block: Block, cat: string, reason: string) => Promise<{ uid: string } | null>;
   viewFigure: (block: Block) => Promise<string>;
@@ -66,6 +68,7 @@ export async function execTool(c: ToolCtx, call: { name: string; args: any }): P
       render: { label: "列出章节", outcome: "→ " + c.sections.length + " 节", bodyText: c.sections.map((s) => "[" + s.index + "] " + s.title + "  (" + s.blockIds.length + " 句)").join("\n") } };
   }
   if (name === "read_section") {
+    if (c.maxReads && (c.reads || 0) >= c.maxReads) return { output: JSON.stringify({ error: "read limit reached" }), render: { label: "读取章节", brief: "index " + args.index, outcome: "✕ 已达上限" } };
     c.reads = (c.reads || 0) + 1;
     const s = c.sections[args.index];
     if (!s) return { output: JSON.stringify({ error: "no such section " + args.index }), render: { label: "读取章节", brief: "index " + args.index, outcome: "✕ 无此节" } };
@@ -74,6 +77,7 @@ export async function execTool(c: ToolCtx, call: { name: string; args: any }): P
     return { output: JSON.stringify(lines), render: { label: "读取章节", brief: s.title, outcome: "→ " + lines.length + " 句", bodyText: lines.map((l) => "[B" + l.id + " " + l.loc + "] " + l.text).join("\n") } };
   }
   if (name === "highlight") {
+    if (c.maxAnn && c.run && c.run.keys.length >= c.maxAnn) return { output: JSON.stringify({ error: "annotation limit reached" }), render: { label: "高亮", outcome: "✕ 已达上限" } };
     const b = c.byId.get(args.id);
     if (!b) return { output: JSON.stringify({ error: "no such sentence id " + args.id }), render: { label: "高亮", brief: "id " + args.id, outcome: "✕ 无此句" } };
     const cat = args.category || "keyterm";

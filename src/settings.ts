@@ -14,8 +14,9 @@ export class AIReaderSettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "AI Reader" });
 
     new Setting(containerEl)
-      .setName("API format").setDesc("chat-completions / responses / anthropic")
+      .setName("API format").setDesc("auto 按模型名自动判断；或手动指定")
       .addDropdown((d) => d
+        .addOption("auto", "Auto (by model name)")
         .addOption("chat", "OpenAI /chat/completions")
         .addOption("responses", "OpenAI /responses")
         .addOption("anthropic", "Anthropic /messages")
@@ -56,6 +57,14 @@ export class AIReaderSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Serper API Key").setDesc("web search 用（serper.dev）。留空则只有 web_fetch，没有 web_search。")
       .addText((t) => { t.setPlaceholder("serper.dev — web_search 必填").setValue(s.serperKey).onChange(async (v) => { s.serperKey = v.trim(); await save(); }); t.inputEl.type = "password"; });
+
+    new Setting(containerEl)
+      .setName("Max parallel tools").setDesc("只读工具（读章节/看图/联网）的并发数；设为 1 可强制串行")
+      .addText((t) => t.setValue(String(s.maxParallelTools)).onChange(async (v) => { const n = parseInt(v, 10); s.maxParallelTools = isNaN(n) || n < 1 ? 3 : n; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Custom prompt").setDesc("附加到系统提示的自定义要求（不会覆盖引用/工具/画图规则）")
+      .addTextArea((t) => { t.setPlaceholder("例如：多用例子；术语保留英文…").setValue(s.customPrompt).onChange(async (v) => { s.customPrompt = v; await save(); }); t.inputEl.rows = 3; t.inputEl.style.width = "100%"; });
 
     const test = new Setting(containerEl).setName("Test connection");
     const result = test.descEl.createSpan({ text: "" });

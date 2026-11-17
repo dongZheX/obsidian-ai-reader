@@ -149,6 +149,25 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   const r3 = await m.execTool(tc2, { name: "web_fetch", args: { url: "ftp://nope" } });
   ok(/✕/.test(r3.render.outcome), "web_fetch rejects non-http url");
 
+  // ---- reading skills ----
+  ok(m.SKILLS.length === 8, "8 reading skills defined");
+  ok(m.skillById("peer-review").label === "同行评审", "skillById resolves");
+  ok(m.skillById("nonexistent").id === "deep-read", "unknown skill falls back to default");
+  ok(/阅读技能：同行评审/.test(m.skillDirective("peer-review")), "skillDirective wraps the skill's inject");
+  ok(m.chipsFor("quick").length === m.skillById("quick").presets.length + m.COMMON_PRESETS.length, "chips = skill presets + common presets");
+  ok(m.skillById("peer-review").agentInject && !m.skillById("quick").agentInject, "agentInject only where defined");
+
+  // ---- auto API format by model name ----
+  const auto = (model) => new m.LLM(() => Object.assign({}, m.DEFAULT_SETTINGS, { apiFormat: "auto", model })).fmt();
+  eq(auto("claude-opus-4-8"), "anthropic", "auto: claude -> anthropic");
+  eq(auto("gpt-4o-mini"), "responses", "auto: gpt -> responses");
+  eq(auto("deepseek-chat"), "chat", "auto: other -> chat");
+  eq(new m.LLM(() => Object.assign({}, m.DEFAULT_SETTINGS, { apiFormat: "anthropic", model: "gpt-4o" })).fmt(), "anthropic", "explicit format overrides auto");
+
+  // ---- custom prompt injected ----
+  ok(/自定义要求/.test(new m.LLM(() => Object.assign({}, m.DEFAULT_SETTINGS, { customPrompt: "多用例子" })).systemPrompt("X", "中文")), "custom prompt injected into system prompt");
+  ok(!/自定义要求/.test(new m.LLM(() => m.DEFAULT_SETTINGS).systemPrompt("X", "中文")), "no custom-prompt block when empty");
+
   console.log("");
   if (fails) { console.error(fails + " FAILED"); process.exit(1); }
   console.log("ALL OK");

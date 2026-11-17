@@ -5,3 +5,4 @@ export { toolSchemas, agentTools, execTool } from "../src/agent";
 export { maskTokens } from "../src/render";
 export { DEFAULT_SETTINGS } from "../src/types";
 export { htmlToText, decodeEntities, urlHost } from "../src/websearch";
+export { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor } from "../src/skills";

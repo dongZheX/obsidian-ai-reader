@@ -1,7 +1,8 @@
 export type ApiFormat = "chat" | "responses" | "anthropic";
+export type ApiFormatPref = ApiFormat | "auto";
 
 export interface AIReaderSettings {
-  apiFormat: ApiFormat;
+  apiFormat: ApiFormatPref;
   baseURL: string;
   apiKey: string;
   model: string;
@@ -9,11 +10,14 @@ export interface AIReaderSettings {
   temperature: string;
   maxChars: number;
   maxTokens: number;
-  serperKey: string; // serper.dev key enabling the web_search tool
+  serperKey: string;       // serper.dev key enabling the web_search tool
+  skill: string;           // active reading-skill id
+  customPrompt: string;    // user-defined extra instructions
+  maxParallelTools: number; // concurrency for read-only tool calls
 }
 
 export const DEFAULT_SETTINGS: AIReaderSettings = {
-  apiFormat: "chat",
+  apiFormat: "auto",
   baseURL: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",
@@ -22,6 +26,9 @@ export const DEFAULT_SETTINGS: AIReaderSettings = {
   maxChars: 60000,
   maxTokens: 0,
   serperKey: "",
+  skill: "deep-read",
+  customPrompt: "",
+  maxParallelTools: 3,
 };
 
 export type BlockType = "heading" | "paragraph" | "table" | "image" | "math" | "code";

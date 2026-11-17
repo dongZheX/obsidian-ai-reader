@@ -9,24 +9,11 @@ import { CATEGORY_LABELS, colorForCategory } from "./annotate";
 import { isPdfView, extractPdfBlocks, pdfGoToPage } from "./pdf";
 import { saveConversationToNote } from "./notes";
 import { webSearch, webFetch } from "./websearch";
+import { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor, Preset } from "./skills";
 
 export const VIEW_TYPE = "ai-reader-view";
 
 interface SourceDoc { kind: "md" | "pdf"; file: TFile; path: string; blocks: Block[] | null; viewRef?: any; }
-
-const PRESETS = [
-  { label: "总结全文", q: "请分【研究问题 / 方法 / 主要发现 / 结论与意义 / 局限】五部分，结构化总结这篇文档。", broad: true },
-  { label: "总结(含图表)", q: "结合正文与图表，分【研究问题 / 方法 / 主要发现(含关键图表) / 结论与意义 / 局限】结构化总结。", broad: true, withFigures: true },
-  { label: "三行摘要", q: "用三行中文给出极简摘要：问题、方法、结论各一行。", broad: true },
-  { label: "关键词", q: "列出 6-10 个关键术语，每个一句话解释，并用 [B<id>] 标注来源。", broad: true },
-  { label: "核心贡献", q: "这篇文档的核心贡献是什么？", broad: false },
-  { label: "方法", q: "它用了什么方法？简要说明。", broad: false },
-  { label: "主要结论", q: "主要结论或实验结果是什么？", broad: false },
-  { label: "局限", q: "有哪些局限或未来工作？", broad: false },
-  { label: "自动高亮", q: "从全文挑选 6-10 个最关键的句子，对每一句用 [[hl:<id>]] 标出；可附 [[note:<id>|一句话理由]]。逐条给出指令并简要说明理由。", broad: true, autoApply: true },
-  { label: "总结我的高亮", q: "请总结我在这篇文档里高亮和批注的内容，并说明它们之间的联系与整体脉络。", broad: false, annos: true },
-  { label: "基于我的批注", q: "基于我在笔记里的高亮和批注回答：它们共同说明了什么？我可能在关注哪些问题？有没有遗漏的要点？", broad: false, annos: true },
-];
 
 const FOLLOWUPS: [string, string][] = [
   ["更详细", "请在上一条回答基础上展开讲得更详细，补充细节与例子。"],
@@ -42,8 +29,11 @@ export class AIReaderView extends ItemView {
   private sendEl!: HTMLButtonElement;
   private modelPillEl!: HTMLButtonElement;
   private previewEl!: HTMLElement;
+  private chipsEl!: HTMLElement;
+  private skillBtn!: HTMLElement;
   private modelMenu: HTMLElement | null = null;
   private modelList: string[] | null = null;
+  private skillMenu: HTMLElement | null = null;
 
   private source: SourceDoc | null = null;
   streaming = false;
@@ -63,7 +53,7 @@ export class AIReaderView extends ItemView {
     this.registerEvent(this.app.workspace.on("file-open", () => this.refresh()));
     await this.refresh();
   }
-  async onClose() { this.closeModelMenu(); }
+  async onClose() { this.closeModelMenu(); this.closeSkillMenu(); }
 
   // --------------------------------------------------------------- skeleton
   private buildSkeleton() {
@@ -79,6 +69,9 @@ export class AIReaderView extends ItemView {
     deepBtn.title = "深读模式：遍历所有章节、主动读图（更慢更贵）";
     if (this.plugin.deepRead) deepBtn.addClass("air-deep-on");
     deepBtn.onclick = () => { this.plugin.deepRead = !this.plugin.deepRead; deepBtn.setText("深读 " + (this.plugin.deepRead ? "开" : "关")); deepBtn.toggleClass("air-deep-on", this.plugin.deepRead); };
+    this.skillBtn = top.createDiv({ cls: "air-top-btn air-skillbtn", text: "技能 ▾" });
+    this.skillBtn.title = "选择阅读技能：切换方法与下方快捷按钮";
+    this.skillBtn.onclick = (e) => { e.stopPropagation(); this.toggleSkillMenu(); };
     const noteBtn = top.createDiv({ cls: "air-top-btn", text: "存为笔记" });
     noteBtn.onclick = () => this.saveNote();
     top.createDiv("air-spacer");
@@ -88,11 +81,8 @@ export class AIReaderView extends ItemView {
     this.statusEl = root.createDiv("air-status");
     this.msgsEl = root.createDiv("air-chat-msgs");
 
-    const chips = root.createDiv("air-chips");
-    for (const p of PRESETS) {
-      const c = chips.createEl("button", { cls: "air-chip", text: p.label });
-      c.onclick = () => this.send(p.q, { broad: p.broad, autoApply: (p as any).autoApply, annos: (p as any).annos, withFigures: (p as any).withFigures });
-    }
+    this.chipsEl = root.createDiv("air-chips");
+    this.renderChips();
 
     const footer = root.createDiv("air-footer");
     this.modelPillEl = footer.createEl("button", { cls: "air-modelpill" });
@@ -117,7 +107,36 @@ export class AIReaderView extends ItemView {
     this.previewEl.style.display = "none";
 
     this.updateModelPill();
+    this.updateSkillBtn();
   }
+
+  // ---- reading skills: picker + per-skill chips ----
+  private updateSkillBtn() { if (this.skillBtn) this.skillBtn.setText("技能 · " + skillById(this.plugin.settings.skill).label + " ▾"); }
+  private renderChips() {
+    if (!this.chipsEl) return;
+    this.chipsEl.empty();
+    for (const p of chipsFor(this.plugin.settings.skill)) {
+      const c = this.chipsEl.createEl("button", { cls: "air-chip", text: p.label });
+      c.onclick = () => this.send(p.q, { broad: p.broad, autoApply: p.autoApply, annos: p.annos, withFigures: p.withFigures });
+    }
+  }
+  private toggleSkillMenu() {
+    if (this.skillMenu) { this.closeSkillMenu(); return; }
+    this.closeModelMenu();
+    const menu = this.contentEl.createDiv("air-skillmenu");
+    const cur = skillById(this.plugin.settings.skill).id;
+    for (const s of SKILLS) {
+      const it = menu.createDiv({ cls: "air-skillitem" + (s.id === cur ? " air-skillitem-on" : "") });
+      it.createDiv({ cls: "air-skillitem-t", text: s.label });
+      it.createDiv({ cls: "air-skillitem-d", text: s.desc });
+      it.onclick = async (e) => { e.stopPropagation(); this.plugin.settings.skill = s.id; await this.plugin.saveSettings(); this.updateSkillBtn(); this.renderChips(); this.closeSkillMenu(); };
+    }
+    this.skillMenu = menu;
+    const onDoc = (ev: MouseEvent) => { if (this.skillMenu && !this.skillMenu.contains(ev.target as Node) && ev.target !== this.skillBtn) this.closeSkillMenu(); };
+    (this.skillMenu as any)._onDoc = onDoc;
+    setTimeout(() => document.addEventListener("click", onDoc), 0);
+  }
+  private closeSkillMenu() { if (this.skillMenu) { const od = (this.skillMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.skillMenu.remove(); this.skillMenu = null; } }
 
   private setStatus(msg: string, kind?: string) { this.statusEl.setText(msg || ""); this.statusEl.className = "air-status" + (kind ? " air-status-" + kind : ""); }
   private updateSendButton() { this.sendEl.setText(this.streaming ? "■" : "↑"); this.sendEl.toggleClass("air-send-stop", this.streaming); }
@@ -292,7 +311,7 @@ export class AIReaderView extends ItemView {
       const toolNote = "\n\n上面的正文可能是节选。你可以调用工具查阅更多内容：list_sections 看章节结构；read_section 读取某一章拿到每句 id；list_figures 列出图表；view_figure 识读某张图/表；" +
         (canWrite ? "highlight 高亮某个句子 id（给 category 和一句话 reason）。" : "（当前文档为 PDF，不支持写入标注。）") + webNote +
         (deep ? "【深读模式】回答前请主动用 list_sections + read_section 读取所有相关章节，并对相关图/表 view_figure。" : "当注入正文不足以准确回答、或涉及具体数据/图表时，请主动调用 read_section / view_figure 查阅后再答；普通问题可直接作答。");
-      const sys = this.plugin.llm.systemPrompt(ctx, this.lang()) + toolNote + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
+      const sys = this.plugin.llm.systemPrompt(ctx, this.lang()) + toolNote + skillDirective(this.plugin.settings.skill) + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
       const messages: ChatMessage[] = [{ role: "system", content: sys }, ...hist.slice(-12)];
       if (!opts.skipUser) messages.push({ role: "user", content: text });
 
@@ -319,8 +338,7 @@ export class AIReaderView extends ItemView {
         if (res.calls && res.calls.length && !this.cancel) {
           this.plugin.llm.pushAssistantToolTurn(fmt, messages, { text: res.text, calls: res.calls });
           ensureToolLog(); this.setStatus("调用工具中…", "busy");
-          const results: { id: string; name: string; output: string }[] = [];
-          for (const call of res.calls) { const r = await execTool(tc, call); this.appendToolGrouped(toolLog, grp, r.render); results.push({ id: call.id, name: call.name, output: r.output }); }
+          const results = await this.runToolCalls(tc, res.calls, toolLog, grp);
           this.plugin.llm.pushToolResults(fmt, messages, results);
           answerEl = bubble.createDiv("air-answer");
           this.msgsEl.scrollTop = this.msgsEl.scrollHeight;
@@ -375,6 +393,33 @@ export class AIReaderView extends ItemView {
   }
   private serperOn(): boolean { return !!(this.plugin.settings.serperKey || "").trim(); }
 
+  // Run one round's tool calls. Read-only calls (sections/figures/web) run
+  // concurrently up to maxParallelTools; side-effecting calls (highlight/finish)
+  // stay serial and in order. Per-call failures become an error result. Tool
+  // blocks render in the original call order. Ported from _runToolCalls.
+  private async runToolCalls(tc: ToolCtx, calls: { id: string; name: string; args: any }[], logWrap: HTMLElement, grp: any): Promise<{ id: string; name: string; output: string; finish?: boolean }[]> {
+    const RO = new Set(["list_sections", "read_section", "list_figures", "view_figure", "web_search", "web_fetch"]);
+    const limit = Math.max(1, Number(this.plugin.settings.maxParallelTools) || 3);
+    const slots: any[] = new Array(calls.length);
+    const run1 = async (i: number) => {
+      try { slots[i] = await execTool(tc, calls[i]); }
+      catch (e: any) { slots[i] = { output: JSON.stringify({ error: String((e && e.message) || e) }), render: { label: calls[i].name, outcome: "✕ 失败" } }; }
+    };
+    const ro: number[] = [], wr: number[] = [];
+    calls.forEach((call, i) => (RO.has(call.name) ? ro : wr).push(i));
+    let p = 0;
+    const worker = async () => { while (p < ro.length) await run1(ro[p++]); };
+    await Promise.all(Array.from({ length: Math.min(limit, ro.length) }, () => worker()));
+    for (const i of wr) await run1(i); // side effects serial + in order
+    const results: { id: string; name: string; output: string; finish?: boolean }[] = [];
+    for (let i = 0; i < calls.length; i++) {
+      const r = slots[i];
+      this.appendToolGrouped(logWrap, grp, r.render);
+      results.push({ id: calls[i].id, name: calls[i].name, output: r.output, finish: r.finish });
+    }
+    return results;
+  }
+
   // tool-block rendering (collapsible, grouped) -----------------------------
   private buildToolBlock(r: ToolBlockSpec): HTMLElement {
     const block = createDiv("air-tool");
@@ -423,6 +468,7 @@ export class AIReaderView extends ItemView {
     const logWrap = bubble.createDiv("air-toollog");
 
     const tc = this.buildToolCtx(blocks);
+    tc.maxReads = MAX_READS; tc.maxAnn = MAX_ANN;
     const grp: any = {};
     let steps = 0;
     const setHead = () => headline.setText("🔧 阅读并标注中… 第 " + steps + " 步 · 已标注 " + tc.run.keys.length + " 处");
@@ -432,7 +478,8 @@ export class AIReaderView extends ItemView {
       (this.serperOn() ? "需要核对背景、术语或相关工作时，可用 web_search 联网搜索、web_fetch 抓取网页。\n" : "需要抓取网页正文时可用 web_fetch。\n") +
       "流程：先 list_sections；再对值得读的章节逐个 read_section；对真正关键的句子调用 highlight（每节通常 2-6 句，精选，避免过度标注）；覆盖重要章节后调用 finish 结束。\n" +
       (deep ? "【深读模式】务必遍历所有章节（对每个 section 都 read_section），并对每张图/表 view_figure。\n" : "") +
-      "类别只能是 contribution / method / result / limitation / keyterm。highlight 的 id 必须来自 read_section 返回的 id。";
+      "类别只能是 contribution / method / result / limitation / keyterm。highlight 的 id 必须来自 read_section 返回的 id。" +
+      (skillById(this.plugin.settings.skill).agentInject ? "\n" + skillById(this.plugin.settings.skill).agentInject : "");
     const messages: ChatMessage[] = [{ role: "system", content: sys }, { role: "user", content: deep ? "请深读本文档（遍历所有章节 + 看所有图表）并标注关键句。先 list_sections。" : "请通读本文档并标注关键句。先 list_sections。" }];
     const tools = toolSchemas(fmt, { serper: this.serperOn() });
 
@@ -451,16 +498,9 @@ export class AIReaderView extends ItemView {
           break;
         }
         this.plugin.llm.pushAssistantToolTurn(fmt, messages, parsed);
-        const results: { id: string; name: string; output: string }[] = [];
-        for (const call of parsed.calls) {
-          steps++; setHead();
-          if (call.name === "read_section" && tc.reads >= MAX_READS) { results.push({ id: call.id, name: call.name, output: JSON.stringify({ error: "read limit reached" }) }); continue; }
-          const r = await execTool(tc, call);
-          this.appendToolGrouped(logWrap, grp, r.render);
-          results.push({ id: call.id, name: call.name, output: r.output });
-          if (r.finish) finished = true;
-          if (tc.run.keys.length >= MAX_ANN) break;
-        }
+        const results = await this.runToolCalls(tc, parsed.calls, logWrap, grp);
+        steps += parsed.calls.length; setHead();
+        if (results.some((r) => r.finish)) finished = true;
         this.plugin.llm.pushToolResults(fmt, messages, results);
         setHead(); this.msgsEl.scrollTop = this.msgsEl.scrollHeight;
       }
@@ -625,8 +665,8 @@ export class AIReaderView extends ItemView {
     if (this.modelMenu) { this.closeModelMenu(); return; }
     const menu = this.contentEl.createDiv("air-modelmenu");
     const fmtRow = menu.createDiv("air-fmtrow");
-    const cur = this.plugin.llm.fmt();
-    for (const [val, lbl] of [["chat", "chat"], ["responses", "responses"], ["anthropic", "claude"]] as [any, string][]) {
+    const cur = this.plugin.settings.apiFormat;
+    for (const [val, lbl] of [["auto", "auto"], ["chat", "chat"], ["responses", "responses"], ["anthropic", "claude"]] as [any, string][]) {
       const b = fmtRow.createEl("button", { cls: "air-fmt" + (cur === val ? " air-fmt-on" : ""), text: lbl });
       b.onclick = async (e) => { e.stopPropagation(); this.plugin.settings.apiFormat = val; await this.plugin.saveSettings(); this.updateModelPill(); this.closeModelMenu(); this.toggleModelMenu(); };
     }
