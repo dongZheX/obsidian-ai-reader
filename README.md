@@ -4,11 +4,12 @@ Read papers with an AI assistant inside Obsidian. A chat panel sits in the
 sidebar, grounded in the note (or PDF) you're reading — answers cite the source,
 and a click on any citation badge jumps back to that line.
 
-This is an Obsidian port of [AI Reader for Zotero](https://github.com/dongZheX/zotero-ai-reader).
+> **Zotero user?** This is the Obsidian port of **[AI Reader for Zotero →
+> github.com/dongZheX/zotero-ai-reader](https://github.com/dongZheX/zotero-ai-reader)**.
+> Same reading assistant, grounded in Zotero's PDFs instead of Markdown notes.
+
 Zotero's document is a PDF with page coordinates; Obsidian's is a Markdown note,
 so the same interaction concepts are re-grounded on Markdown.
-
-**English** · [中文](README.zh-CN.md)
 
 ## What it is
 
