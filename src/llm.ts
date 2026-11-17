@@ -266,7 +266,23 @@ export class LLM {
       "3) 当用户要求划线/标注，或你认为某处值得高亮时，可输出指令：划线用 [[hl:<id>]]，加批注用 [[note:<id>|批注内容]]。这些会渲染成按钮由用户一键应用到笔记。\n" +
       "4) 当用户想看某个图/表的视觉内容、或你需要看图才能准确解释时，输出 [[fig:<id>]]（id 为图/表块），会把该图交给多模态模型识图。\n" +
       "5) 若正文前附有【用户在笔记中的高亮与批注】，当用户问到『我的高亮/批注』时请优先结合这些内容回答。\n" +
-      "6) 需要用图示说明（流程、架构、时间线、关系等）时，请输出一个 ```svg 代码块，会被内联渲染成矢量图。要点：用 <rect>/<text>/<line>/<path>/<polygon> 等手绘，给根 <svg> 设置 width/height 和 viewBox；框与文字不要重叠、箭头对齐、整体宽度不超过约 560；颜色柔和。也可用 ```mermaid（Obsidian 原生渲染）。仅在确实有助于理解时才画。\n\n" +
+      "6) 需要用图示说明（流程、架构、时间线、关系等）时，请输出一个 ```svg 代码块，会被内联渲染成矢量图。要点：用 <rect>/<text>/<line>/<path>/<polygon> 等手绘，给根 <svg> 设置 width/height 和 viewBox；框与文字不要重叠、箭头对齐、整体宽度不超过约 560；颜色柔和、克制，别套用 AI 默认审美（米色+衬线、紫蓝渐变、处处居中/圆角、无谓编号）；不要用 emoji。也可用 ```mermaid（Obsidian 原生渲染）。仅在确实有助于理解时才画。\n\n" +
+      this.styleGuide() +
       "正文内容：\n\n" + ctx;
+  }
+
+  // Style constraints so answers read human-written, not model-generic.
+  // Distilled from the `sepia` humanizer skill's "signs of AI writing" rules,
+  // plus Chinese sci-writing term handling. A plugin has no skills at runtime,
+  // so the guidance lives in the system prompt.
+  styleGuide(): string {
+    return "【表达风格】像懂行的人跟同行说话：直接、具体、克制，别带 AI 腔。\n" +
+      "- 先说结论，别铺垫；不要“让我们深入探讨 / 首先需要明确 / 综上所述”这类套路开场与升华式收尾，也别用“这不仅是 X，更是 Y”的句式或金句式独句结尾。\n" +
+      "- 不堆排比和“三件套”，该列几点就列几点；少用破折号串句，多用短句和句号。\n" +
+      "- 不用空话套话与夸大词（如“值得注意的是 / 不言而喻 / 彰显 / 赋能 / 生态 / 闭环 / 助力 / 至关重要 / 深刻洞察”），换成平实说法。\n" +
+      "- 不写“专家认为 / 研究表明”这类空泛背书；有依据就用 [B<id>] 指向原文，没有就别编。\n" +
+      "- 不用装饰性加粗和 emoji，小标题用普通短语；不复述问题，不说“希望对你有帮助”之类客套。\n" +
+      "- 术语按中文科技写作习惯：模型名、指标名、英文缩写（如 SFT、RLHF、VQA、gold label/gold data）保留原文，不生硬直译——例如 gold 在“gold 数据 / 黄金标准”语境里别译成“黄金”；没有通行译名就保留英文并括注解释。\n" +
+      "- 无论用哪种语言回答，都遵循以上风格，读起来像人写的，而不是模板。\n\n";
   }
 }

@@ -61,7 +61,8 @@ export async function explainMessages(plugin: AIReaderPlugin, file: TFile | null
   }
   const hist = (file && plugin.chatStore.get(file.path)) || [];
   const sys = "You explain excerpts from academic papers/notes clearly and concisely in " + lang +
-    ". 2-4 sentences. The context and prior conversation are BACKGROUND only — use them to stay consistent, but answer by explaining the selected passage directly. Do NOT comment on, apologise for, or correct earlier messages." +
+    ". 2-4 sentences. The context and prior conversation are BACKGROUND only — use them to stay consistent, but answer by explaining the selected passage directly. Do NOT comment on, apologise for, or correct earlier messages.\n\n" +
+    plugin.llm.styleGuide() +
     (ctx ? "\n\n## 相关段落\n" + ctx : "");
   const messages: ChatMessage[] = [{ role: "system", content: sys }];
   for (const m of hist.slice(-8)) if (m && m.role && m.content) messages.push({ role: m.role, content: m.content });

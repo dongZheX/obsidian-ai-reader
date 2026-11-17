@@ -99,6 +99,17 @@ npm run build     # tsc --noEmit + esbuild → main.js
 node test/sim.js  # headless logic tests → ALL OK
 ```
 
+## Credits
+
+Borrowed skills & projects:
+
+| Source | What was borrowed |
+|---|---|
+| [`sepia`](https://github.com/anthropics) humanizer skill (based on StoryScope, arXiv:2604.03136) | The **de-AI-flavor writing-style guide** — the system prompt's "signs of AI writing" rules distilled into an always-on style constraint so answers read human-written, not model-generic. |
+| [AI Reader for Zotero](https://github.com/dongZheX/zotero-ai-reader) | The whole design this plugin is ported from (grounded chat, click-to-source, AI annotations, agentic read-&-annotate, figure vision, selection popup). |
+
+The Zotero original in turn credits Moonlight, [yilewang/llm-for-zotero](https://github.com/yilewang/llm-for-zotero), [papersgpt/papersgpt-for-zotero](https://github.com/papersgpt/papersgpt-for-zotero), [cboulanger/zotero-skills](https://github.com/cboulanger/zotero-skills), and [stark1tty/zotero-AI-Butler](https://github.com/stark1tty/zotero-AI-Butler-english).
+
 ## License
 
 [Apache License 2.0](LICENSE)

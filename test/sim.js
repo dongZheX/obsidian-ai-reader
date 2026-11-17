@@ -64,7 +64,9 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   // ---- retrieval ----
   const ctx = m.buildRetrievedContext(blocks, "transformer training", 60000);
   ok(/\[B\d+ L\d+\]/.test(ctx), "retrieved context tags blocks with [B# L#]");
-  ok(/```svg/.test(new m.LLM(() => m.DEFAULT_SETTINGS).systemPrompt("CTX", "中文")), "system prompt tells the model it can draw ```svg diagrams");
+  { const sp = new m.LLM(() => m.DEFAULT_SETTINGS).systemPrompt("CTX", "中文");
+    ok(/```svg/.test(sp), "system prompt tells the model it can draw ```svg diagrams");
+    ok(/表达风格/.test(sp) && /别带 AI 腔/.test(sp), "system prompt carries the de-AI-flavor style guide"); }
   const bounded = m.buildContextBounded(blocks, 60000);
   ok(bounded.includes("[B"), "bounded context produced");
 
