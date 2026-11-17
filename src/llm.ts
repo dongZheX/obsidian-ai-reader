@@ -5,7 +5,7 @@ import { AIReaderSettings, ApiFormat, ChatMessage, ToolCall } from "./types";
 import { httpText, httpStreamLines } from "./net";
 
 export interface UsageMeta { inTok?: number; outTok?: number; ctxChars?: number; }
-export interface StreamResult { text: string; calls: ToolCall[]; }
+export interface StreamResult { text: string; calls: ToolCall[]; reasoning: any[]; }
 
 export class LLM {
   constructor(private getSettings: () => AIReaderSettings) {}
@@ -62,9 +62,9 @@ export class LLM {
     }
     if (fmt === "anthropic") {
       const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-      const msgs = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
+      const msgs = this.anthropicCacheMsgs(messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content })));
       const body: any = { model, messages: msgs, max_tokens: maxTok || 32000, temperature: temp, stream: !!stream };
-      if (system) body.system = system;
+      if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
       return JSON.stringify(body);
     }
     const body: any = { model, messages, temperature: temp, stream: !!stream };
@@ -73,25 +73,68 @@ export class LLM {
     return JSON.stringify(body);
   }
 
-  // Tool-calling body (shaped per format).
-  toolBody(fmt: ApiFormat, messages: ChatMessage[], tools: any[], stream: boolean): string {
+  // Add an Anthropic cache_control breakpoint to the last message (and the
+  // caller caches the stable system prompt), so multi-turn requests on the same
+  // document hit the prompt cache instead of re-billing it. Ported.
+  anthropicCacheMsgs(msgs: any[]): any[] {
+    if (!msgs.length) return msgs;
+    const out = msgs.slice();
+    const last = out[out.length - 1];
+    const CC = { type: "ephemeral" };
+    if (Array.isArray(last.content) && last.content.length) {
+      const blocks = last.content.map((b: any) => ({ ...b }));
+      blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: CC };
+      out[out.length - 1] = { ...last, content: blocks };
+    } else if (typeof last.content === "string") {
+      out[out.length - 1] = { ...last, content: [{ type: "text", text: last.content, cache_control: CC }] };
+    }
+    return out;
+  }
+
+  // Tool-calling body (shaped per format). `tools` may be null/empty (no tools).
+  toolBody(fmt: ApiFormat, messages: ChatMessage[], tools: any[] | null, stream: boolean): string {
     const model = this.s().model, temp = this.temp(), maxTok = this.maxTok();
+    const hasTools = Array.isArray(tools) && tools.length > 0;
     if (fmt === "anthropic") {
       const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
-      const msgs = messages.filter((m) => m.role !== "system");
-      const body: any = { model, messages: msgs, max_tokens: maxTok || 8000, temperature: temp, tools, stream: !!stream };
-      if (system) body.system = system;
+      const msgs = this.anthropicCacheMsgs(messages.filter((m) => m.role !== "system"));
+      const body: any = { model, messages: msgs, max_tokens: maxTok || 32000, temperature: temp, stream: !!stream };
+      if (hasTools) body.tools = tools;
+      if (system) body.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
       return JSON.stringify(body);
     }
     if (fmt === "responses") {
-      const body: any = { model, input: messages, temperature: temp, tools, tool_choice: "auto", stream: !!stream };
+      const body: any = { model, input: messages, temperature: temp, stream: !!stream };
+      if (hasTools) { body.tools = tools; body.tool_choice = "auto"; }
       if (maxTok) body.max_output_tokens = maxTok;
       return JSON.stringify(body);
     }
-    const body: any = { model, messages, temperature: temp, tools, tool_choice: "auto", stream: !!stream };
+    const body: any = { model, messages, temperature: temp, stream: !!stream };
+    if (hasTools) { body.tools = tools; body.tool_choice = "auto"; }
     if (maxTok) body.max_tokens = maxTok;
     if (stream) body.stream_options = { include_usage: true };
     return JSON.stringify(body);
+  }
+
+  // Accumulate streamed reasoning/thinking blocks (ported _streamReasoningDelta).
+  streamReasoningDelta(fmt: ApiFormat, j: any, racc: Record<number, any>) {
+    if (fmt === "anthropic") {
+      if (j.type === "content_block_start" && j.content_block) {
+        if (j.content_block.type === "thinking") racc[j.index] = { type: "thinking", thinking: j.content_block.thinking || "", signature: j.content_block.signature || "" };
+        else if (j.content_block.type === "redacted_thinking") racc[j.index] = { type: "redacted_thinking", data: j.content_block.data || "" };
+      } else if (j.type === "content_block_delta" && j.delta && racc[j.index]) {
+        if (j.delta.type === "thinking_delta") racc[j.index].thinking += j.delta.thinking || "";
+        else if (j.delta.type === "signature_delta") racc[j.index].signature = (racc[j.index].signature || "") + (j.delta.signature || "");
+      }
+      return;
+    }
+    if (fmt === "responses") {
+      if ((j.type === "response.output_item.added" || j.type === "response.output_item.done") && j.item && j.item.type === "reasoning") racc[j.output_index] = j.item;
+    }
+  }
+  finalizeReasoning(racc: Record<number, any>): any[] {
+    const keys = Object.keys(racc);
+    return keys.length ? keys.sort((a, b) => +a - +b).map((k) => racc[+k]).filter(Boolean) : [];
   }
 
   captureUsage(meta: UsageMeta, j: any) {
@@ -146,34 +189,44 @@ export class LLM {
   finalizeToolCalls(tc: Record<number, any>): ToolCall[] {
     return Object.keys(tc).sort((a, b) => +a - +b).map((k) => ({ id: tc[+k].id, name: tc[+k].name, args: this.safeJSON(tc[+k].args) })).filter((c) => c.name);
   }
-  parseToolCalls(fmt: ApiFormat, data: any): { text: string; calls: ToolCall[]; raw: any } {
+  parseToolCalls(fmt: ApiFormat, data: any): { text: string; calls: ToolCall[]; reasoning: any[]; raw: any } {
     if (fmt === "anthropic") {
       const content = Array.isArray(data.content) ? data.content : [];
-      let text = ""; const calls: ToolCall[] = [];
-      for (const c of content) { if (c.type === "text") text += c.text || ""; else if (c.type === "tool_use") calls.push({ id: c.id, name: c.name, args: c.input || {} }); }
-      return { text, calls, raw: content };
+      let text = ""; const calls: ToolCall[] = []; const reasoning: any[] = [];
+      for (const c of content) {
+        if (c.type === "text") text += c.text || "";
+        else if (c.type === "tool_use") calls.push({ id: c.id, name: c.name, args: c.input || {} });
+        else if (c.type === "thinking" || c.type === "redacted_thinking") reasoning.push(c);
+      }
+      return { text, calls, reasoning, raw: content };
     }
     if (fmt === "responses") {
       const out = Array.isArray(data.output) ? data.output : [];
-      let text = ""; const calls: ToolCall[] = [];
-      for (const o of out) { if (o.type === "function_call") calls.push({ id: o.call_id || o.id, name: o.name, args: this.safeJSON(o.arguments) }); else if (o.type === "message" && Array.isArray(o.content)) text += o.content.map((x: any) => x.text || "").join(""); }
+      let text = ""; const calls: ToolCall[] = []; const reasoning: any[] = [];
+      for (const o of out) {
+        if (o.type === "function_call") calls.push({ id: o.call_id || o.id, name: o.name, args: this.safeJSON(o.arguments) });
+        else if (o.type === "reasoning") reasoning.push(o);
+        else if (o.type === "message" && Array.isArray(o.content)) text += o.content.map((x: any) => x.text || "").join("");
+      }
       if (typeof data.output_text === "string" && data.output_text) text = data.output_text;
-      return { text, calls, raw: out };
+      return { text, calls, reasoning, raw: out };
     }
     const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
     const calls = (msg.tool_calls || []).map((tc: any) => ({ id: tc.id, name: tc.function && tc.function.name, args: this.safeJSON(tc.function && tc.function.arguments) }));
-    return { text: msg.content || "", calls, raw: msg };
+    return { text: msg.content || "", calls, reasoning: [], raw: msg };
   }
-  pushAssistantToolTurn(fmt: ApiFormat, messages: ChatMessage[], parsed: { text?: string; calls?: ToolCall[] }) {
-    const calls = parsed.calls || [], text = parsed.text || "";
+  pushAssistantToolTurn(fmt: ApiFormat, messages: ChatMessage[], parsed: { text?: string; calls?: ToolCall[]; reasoning?: any[] }) {
+    const calls = parsed.calls || [], text = parsed.text || "", reasoning = parsed.reasoning || [];
     if (fmt === "anthropic") {
       const content: any[] = [];
+      for (const r of reasoning) content.push(r); // thinking FIRST, verbatim (keeps signature)
       if (text) content.push({ type: "text", text });
       for (const c of calls) content.push({ type: "tool_use", id: c.id, name: c.name, input: c.args || {} });
       messages.push({ role: "assistant", content });
       return;
     }
     if (fmt === "responses") {
+      for (const r of reasoning) messages.push(r as any); // reasoning item verbatim, before the function_call
       if (text) messages.push({ role: "assistant", content: text });
       for (const c of calls) messages.push({ type: "function_call", call_id: c.id, name: c.name, arguments: JSON.stringify(c.args || {}) } as any);
       return;
@@ -218,11 +271,13 @@ export class LLM {
     return full;
   }
 
-  // Streamed turn that returns both the streamed text and any tool calls.
-  async streamAnswer(messages: ChatMessage[], tools: any[], onDelta: (d: string) => void, shouldStop: () => boolean, meta?: UsageMeta): Promise<StreamResult> {
+  // Streamed turn that returns the streamed text, any tool calls, and reasoning.
+  // tools may be null (final wrap-up without tools). Long answers can take
+  // minutes, so streaming gets a generous 10-min idle ceiling.
+  async streamAnswer(messages: ChatMessage[], tools: any[] | null, onDelta: (d: string) => void, shouldStop: () => boolean, meta?: UsageMeta): Promise<StreamResult> {
     meta = meta || {};
     const fmt = this.fmt();
-    let text = ""; const tc: Record<number, any> = {};
+    let text = ""; const tc: Record<number, any> = {}; const racc: Record<number, any> = {};
     await httpStreamLines(this.endpointFor(fmt), this.headersFor(fmt), this.toolBody(fmt, messages, tools, true), (line) => {
       const l = line.trim();
       if (!l || !l.startsWith("data:")) return;
@@ -233,12 +288,13 @@ export class LLM {
       this.captureUsage(meta!, j);
       const d = this.streamDelta(fmt, j); if (d) { text += d; onDelta(d); }
       this.streamToolDelta(fmt, j, tc);
-    }, shouldStop);
-    return { text, calls: this.finalizeToolCalls(tc) };
+      this.streamReasoningDelta(fmt, j, racc);
+    }, shouldStop, 600000);
+    return { text, calls: this.finalizeToolCalls(tc), reasoning: this.finalizeReasoning(racc) };
   }
 
   // Non-streaming tool turn (used by the agent loop).
-  async toolTurn(messages: ChatMessage[], tools: any[]): Promise<{ text: string; calls: ToolCall[]; raw: any }> {
+  async toolTurn(messages: ChatMessage[], tools: any[]): Promise<{ text: string; calls: ToolCall[]; reasoning: any[]; raw: any }> {
     const fmt = this.fmt();
     const resp = await httpText(this.endpointFor(fmt), { method: "POST", headers: this.headersFor(fmt), body: this.toolBody(fmt, messages, tools, false) });
     if (!resp.ok) throw this.fail(resp.status, resp.text);

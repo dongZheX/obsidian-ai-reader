@@ -312,10 +312,16 @@ export class AIReaderView extends ItemView {
         (canWrite ? "highlight 高亮某个句子 id（给 category 和一句话 reason）。" : "（当前文档为 PDF，不支持写入标注。）") + webNote +
         (deep ? "【深读模式】回答前请主动用 list_sections + read_section 读取所有相关章节，并对相关图/表 view_figure。" : "当注入正文不足以准确回答、或涉及具体数据/图表时，请主动调用 read_section / view_figure 查阅后再答；普通问题可直接作答。");
       const sys = this.plugin.llm.systemPrompt(ctx, this.lang()) + toolNote + skillDirective(this.plugin.settings.skill) + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
-      const messages: ChatMessage[] = [{ role: "system", content: sys }, ...hist.slice(-12)];
-      if (!opts.skipUser) messages.push({ role: "user", content: text });
-
       const fmt = this.plugin.llm.fmt();
+      // Continuous agentic context: one live message history (incl. tool turns)
+      // persists across questions; compact it when it grows too large. Tool
+      // results live in `convo`, so chat no longer injects priorContext here.
+      let convo = this.ensureLive(path, fmt);
+      if (opts.skipUser) this.rollbackLiveToLastUser(convo);
+      convo = await this.compactLive(path, convo);
+      if (!opts.skipUser) convo.push({ role: "user", content: text });
+      const withSys = (): ChatMessage[] => [{ role: "system", content: sys }, ...convo];
+
       const tools = toolSchemas(fmt, { serper: this.serperOn() });
       const tc = this.buildToolCtx(blocks);
       const toolLog = createDiv("air-toollog"); let toolLogAdded = false; const grp: any = {};
@@ -326,7 +332,7 @@ export class AIReaderView extends ItemView {
       for (let round = 0; round < MAX_ROUNDS && !this.cancel; round++) {
         let acc = "", lastR = 0;
         const turnEl = answerEl;
-        const res = await this.plugin.llm.streamAnswer(messages, tools, (d) => {
+        const res = await this.plugin.llm.streamAnswer(withSys(), tools, (d) => {
           acc += d; const el = this.msgsEl;
           const stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 60;
           const now = Date.now();
@@ -336,15 +342,25 @@ export class AIReaderView extends ItemView {
         }, () => this.cancel, meta);
         turnEl.setText(res.text || "");
         if (res.calls && res.calls.length && !this.cancel) {
-          this.plugin.llm.pushAssistantToolTurn(fmt, messages, { text: res.text, calls: res.calls });
+          this.plugin.llm.pushAssistantToolTurn(fmt, convo, { text: res.text, calls: res.calls, reasoning: res.reasoning });
           ensureToolLog(); this.setStatus("调用工具中…", "busy");
           const results = await this.runToolCalls(tc, res.calls, toolLog, grp);
-          this.plugin.llm.pushToolResults(fmt, messages, results);
+          this.plugin.llm.pushToolResults(fmt, convo, results);
           answerEl = bubble.createDiv("air-answer");
           this.msgsEl.scrollTop = this.msgsEl.scrollHeight;
           continue;
         }
         full = res.text || ""; break;
+      }
+
+      // Ran out of rounds without a final answer (model kept calling tools) —
+      // ask once more WITHOUT tools so it must write the answer.
+      if (!full && !this.cancel) {
+        convo.push({ role: "user", content: "请基于以上读取到的内容，给出完整、充分的回答。" });
+        try {
+          const res2 = await this.plugin.llm.streamAnswer(withSys(), null, (d) => { answerEl.setText(answerEl.getText() + d); this.setStatus("整理回答…", "busy"); this.msgsEl.scrollTop = this.msgsEl.scrollHeight; }, () => this.cancel, meta);
+          full = res2.text || answerEl.getText() || "";
+        } catch (e) {}
       }
 
       bubble.removeClass("air-streaming");
@@ -353,6 +369,7 @@ export class AIReaderView extends ItemView {
       this.addMetaLine(msg, meta, full);
       if (tc.run.keys.length) { this.lastRun = tc.run; this.renderAgentSummary(bubble, tc.tally, tc.run.keys.length, false); }
       this.setStatus("", "");
+      convo.push({ role: "assistant", content: full }); // final text turn into the live history
       if (!opts.skipUser) hist.push({ role: "user", content: text });
       hist.push({ role: "assistant", content: full });
       this.plugin.persist.saveChat(path, hist).catch(() => {});
@@ -386,6 +403,8 @@ export class AIReaderView extends ItemView {
         const vm = this.plugin.llm.buildVisionMessages(this.plugin.llm.fmt(), this.lang(), "请详细描述这张" + figKind(block.type) + "展示的内容、坐标轴/变量、关键趋势与结论。", uri);
         return await this.plugin.llm.callLLM(vm);
       },
+      onRead: (index, title, text) => { if (this.source) this.plugin.readFor(this.source.path).set(index, { title, text }); },
+      onFigure: (id, loc, desc) => { if (this.source) this.plugin.figFor(this.source.path).set(id, { loc, desc }); },
       serper: !!(this.plugin.settings.serperKey || "").trim(),
       webSearch: (q, num) => webSearch(this.plugin.settings.serperKey, q, num),
       webFetch: (url) => webFetch(url),
@@ -479,7 +498,8 @@ export class AIReaderView extends ItemView {
       "流程：先 list_sections；再对值得读的章节逐个 read_section；对真正关键的句子调用 highlight（每节通常 2-6 句，精选，避免过度标注）；覆盖重要章节后调用 finish 结束。\n" +
       (deep ? "【深读模式】务必遍历所有章节（对每个 section 都 read_section），并对每张图/表 view_figure。\n" : "") +
       "类别只能是 contribution / method / result / limitation / keyterm。highlight 的 id 必须来自 read_section 返回的 id。" +
-      (skillById(this.plugin.settings.skill).agentInject ? "\n" + skillById(this.plugin.settings.skill).agentInject : "");
+      (skillById(this.plugin.settings.skill).agentInject ? "\n" + skillById(this.plugin.settings.skill).agentInject : "") +
+      this.plugin.priorContext(this.source!.path);
     const messages: ChatMessage[] = [{ role: "system", content: sys }, { role: "user", content: deep ? "请深读本文档（遍历所有章节 + 看所有图表）并标注关键句。先 list_sections。" : "请通读本文档并标注关键句。先 list_sections。" }];
     const tools = toolSchemas(fmt, { serper: this.serperOn() });
 
@@ -695,9 +715,80 @@ export class AIReaderView extends ItemView {
   // --------------------------------------------------------------- misc ops
   private clear() {
     if (!this.source) return;
-    this.plugin.chatStore.set(this.source.path, []);
-    this.plugin.persist.saveChat(this.source.path, []).catch(() => {});
+    const path = this.source.path;
+    this.plugin.chatStore.set(path, []);
+    this.plugin.liveStore.delete(path);          // reset continuous context
+    this.plugin.readStore.delete(path);
+    this.plugin.figStore.delete(path);
+    this.plugin.histSummary.delete(path);
+    this.plugin.persist.saveChat(path, []).catch(() => {});
     this.msgsEl.empty(); this.setStatus("已清空对话。", "muted");
+  }
+
+  // ---- continuous agentic context (live model-facing history + compaction) ----
+  private isUserTurn(m: any): boolean { return m && m.role === "user" && typeof m.content === "string"; }
+  private liveChars(messages: ChatMessage[]): number {
+    let n = 0;
+    for (const m of messages) { try { n += (typeof m.content === "string" ? m.content : JSON.stringify(m.content || m)).length; } catch (e) {} }
+    return n;
+  }
+  private ensureLive(path: string, fmt: string): ChatMessage[] {
+    let e = this.plugin.liveStore.get(path);
+    if (!e || e.fmt !== fmt) {
+      const hist = this.plugin.chatStore.get(path) || [];
+      const messages = hist.filter((m) => m && m.role && typeof m.content === "string").map((m) => ({ role: m.role, content: m.content } as ChatMessage));
+      e = { fmt, messages };
+      this.plugin.liveStore.set(path, e);
+    }
+    return e.messages;
+  }
+  private rollbackLiveToLastUser(convo: ChatMessage[]) {
+    let lastU = -1;
+    for (let i = convo.length - 1; i >= 0; i--) if (this.isUserTurn(convo[i])) { lastU = i; break; }
+    if (lastU >= 0) convo.splice(lastU + 1);
+  }
+  private async compactLive(path: string, convo: ChatMessage[]): Promise<ChatMessage[]> {
+    const TRIGGER = 120000, KEEPCHARS = 60000;
+    if (this.liveChars(convo) < TRIGGER) return convo;
+    const bounds: number[] = [];
+    for (let i = 0; i < convo.length; i++) if (this.isUserTurn(convo[i])) bounds.push(i);
+    if (bounds.length < 2) return convo;
+    let cut = bounds[bounds.length - 1];
+    for (let bi = bounds.length - 1; bi >= 1; bi--) {
+      if (this.liveChars(convo.slice(bounds[bi])) > KEEPCHARS) { cut = bounds[bi + 1] != null ? bounds[bi + 1] : cut; break; }
+      cut = bounds[bi];
+    }
+    const older = convo.slice(0, cut);
+    if (!older.length) return convo;
+    this.setStatus("整理上下文…", "busy");
+    try {
+      const sum = await this.plugin.llm.callLLM([
+        { role: "system", content: "把下面这段『阅读对话 + 工具读取』压缩成要点笔记，务必保留：已读过哪些章节及其关键内容与数据、已识读的图表结论、用户问过/关注的问题、已得出的结论。简洁中文、分条，便于后续继续引用，避免重复读取。" },
+        { role: "user", content: this.turnsToText(older) },
+      ]);
+      const note: ChatMessage = { role: "user", content: "【早期阅读与对话摘要（供连续参考，无需重复读取已覆盖的章节/图表）】\n" + (sum || "").trim() };
+      const next = [note].concat(convo.slice(cut));
+      const e = this.plugin.liveStore.get(path); if (e) e.messages = next;
+      return next;
+    } catch (e) { return convo; }
+  }
+  private turnsToText(messages: ChatMessage[]): string {
+    const out: string[] = [];
+    for (const m of messages) {
+      if (this.isUserTurn(m)) { out.push("用户：" + m.content); continue; }
+      if (m.role === "assistant" && typeof m.content === "string") { if (m.content.trim()) out.push("助手：" + m.content); continue; }
+      if (m.role === "tool") { out.push("（工具结果：" + String(m.content || "").slice(0, 1200) + "）"); continue; }
+      if ((m as any).type === "function_call") { out.push("（调用 " + (m as any).name + "）"); continue; }
+      if ((m as any).type === "function_call_output") { out.push("（工具结果：" + String((m as any).output || "").slice(0, 1200) + "）"); continue; }
+      if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b.type === "text") out.push((m.role === "user" ? "" : "助手：") + b.text);
+          else if (b.type === "tool_use") out.push("（调用 " + b.name + "）");
+          else if (b.type === "tool_result") out.push("（工具结果：" + String(b.content || "").slice(0, 1200) + "）");
+        }
+      }
+    }
+    return out.join("\n");
   }
   private async saveNote() {
     if (!this.source) return;

@@ -19,6 +19,28 @@ export default class AIReaderPlugin extends Plugin {
   histSummary: Map<string, string> = new Map();
   panels: Map<string, AIReaderView> = new Map();
   deepRead = false;
+  // continuous agentic context: persistent model-facing history per path
+  liveStore: Map<string, { fmt: string; messages: ChatMessage[] }> = new Map();
+  // session read-cache: sections/figures the agent has read/viewed, per path
+  readStore: Map<string, Map<number, { title: string; text: string }>> = new Map();
+  figStore: Map<string, Map<number, { loc: string; desc: string }>> = new Map();
+
+  readFor(path: string) { if (!this.readStore.has(path)) this.readStore.set(path, new Map()); return this.readStore.get(path)!; }
+  figFor(path: string) { if (!this.figStore.has(path)) this.figStore.set(path, new Map()); return this.figStore.get(path)!; }
+
+  // Inject sections/figures already read this session so the agent / explain can
+  // build on them without re-reading. Ported from _priorContextForKey.
+  priorContext(path: string): string {
+    if (!path) return "";
+    const parts: string[] = [];
+    for (const [, s] of (this.readStore.get(path) || new Map())) parts.push("## " + s.title + "\n" + s.text);
+    for (const [id, f] of (this.figStore.get(path) || new Map())) parts.push("## 图/表 B" + id + "（" + f.loc + "）\n" + f.desc);
+    if (!parts.length) return "";
+    let body = parts.join("\n\n");
+    const CAP = 40000;
+    if (body.length > CAP) body = "…（较早内容略）…\n" + body.slice(body.length - CAP);
+    return "\n\n【本会话已读资料（已为你读取，可直接引用；不要再 read_section / view_figure 已在此列出的章节/图表）】\n" + body;
+  }
 
   async onload() {
     await this.loadSettings();

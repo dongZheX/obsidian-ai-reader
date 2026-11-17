@@ -32,6 +32,9 @@ export interface ToolCtx {
   serper?: boolean;
   webSearch?: (query: string, num?: number) => Promise<{ title: string; link: string; snippet: string }[]>;
   webFetch?: (url: string) => Promise<{ title: string; text: string }>;
+  // session read-cache sinks (so later turns / the agent / explain can reuse)
+  onRead?: (index: number, title: string, text: string) => void;
+  onFigure?: (id: number, loc: string, desc: string) => void;
 }
 
 // `opts.serper` gates web_search (only offered when a Serper key is set, so the
@@ -74,7 +77,9 @@ export async function execTool(c: ToolCtx, call: { name: string; args: any }): P
     if (!s) return { output: JSON.stringify({ error: "no such section " + args.index }), render: { label: "读取章节", brief: "index " + args.index, outcome: "✕ 无此节" } };
     const lines: any[] = []; let total = 0;
     for (const id of s.blockIds) { const b = c.byId.get(id); if (!b) continue; lines.push({ id: b.id, loc: locLabel(b), text: b.text }); total += (b.text || "").length; if (total > 9000) break; }
-    return { output: JSON.stringify(lines), render: { label: "读取章节", brief: s.title, outcome: "→ " + lines.length + " 句", bodyText: lines.map((l) => "[B" + l.id + " " + l.loc + "] " + l.text).join("\n") } };
+    const btext = lines.map((l) => "[B" + l.id + " " + l.loc + "] " + l.text).join("\n");
+    if (c.onRead) c.onRead(args.index, s.title, btext);
+    return { output: JSON.stringify(lines), render: { label: "读取章节", brief: s.title, outcome: "→ " + lines.length + " 句", bodyText: btext } };
   }
   if (name === "highlight") {
     if (c.maxAnn && c.run && c.run.keys.length >= c.maxAnn) return { output: JSON.stringify({ error: "annotation limit reached" }), render: { label: "高亮", outcome: "✕ 已达上限" } };
@@ -98,6 +103,7 @@ export async function execTool(c: ToolCtx, call: { name: string; args: any }): P
     if (!b) return { output: JSON.stringify({ error: "no such figure id " + args.id }), render: { label: "看图", brief: "id " + args.id, outcome: "✕ 无此图" } };
     try {
       const desc = (await c.viewFigure(b)).trim();
+      if (c.onFigure) c.onFigure(b.id, locLabel(b), desc);
       return { output: JSON.stringify({ description: desc }), render: { label: "看图", brief: figKind(b.type) + " " + locLabel(b), outcome: "→ 已识读", bodyText: desc, jumpId: b.id } };
     } catch (e: any) { return { output: JSON.stringify({ error: String(e.message || e) }), render: { label: "看图", brief: locLabel(b), outcome: "✕ 失败" } }; }
   }

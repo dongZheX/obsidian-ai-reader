@@ -83,7 +83,7 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   const respBody = JSON.parse(makeLLM("responses").bodyFor("responses", msgs, false));
   ok(Array.isArray(respBody.input), "responses body uses input[]");
   const antBody = JSON.parse(makeLLM("anthropic").bodyFor("anthropic", msgs, false));
-  ok(antBody.system === "sys" && antBody.messages.length === 1, "anthropic body splits system out + max_tokens");
+  ok(Array.isArray(antBody.system) && antBody.system[0].text === "sys" && antBody.messages.length === 1, "anthropic body splits system out (cached) ");
   ok(antBody.max_tokens > 0, "anthropic always sets max_tokens");
 
   // ---- tool body + schemas ----
@@ -100,6 +100,27 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   ok(antCalls.text === "hello" && antCalls.calls[0].name === "read_section", "anthropic tool-call parsed");
   const respCalls = L.parseToolCalls("responses", { output: [{ type: "function_call", call_id: "r1", name: "finish", arguments: "{}" }] });
   ok(respCalls.calls[0].name === "finish", "responses tool-call parsed");
+
+  // ---- anthropic cache breakpoints + no-tools body ----
+  const La = makeLLM("anthropic");
+  const cached = La.anthropicCacheMsgs([{ role: "user", content: "hi" }]);
+  ok(Array.isArray(cached[0].content) && cached[0].content[0].cache_control, "anthropicCacheMsgs adds cache_control to last msg");
+  const antTool = JSON.parse(La.toolBody("anthropic", [{ role: "system", content: "S" }, { role: "user", content: "q" }], [{ name: "x" }], false));
+  ok(Array.isArray(antTool.system) && antTool.system[0].cache_control, "anthropic system prompt is cached");
+  const antNoTool = JSON.parse(La.toolBody("anthropic", [{ role: "user", content: "q" }], null, false));
+  ok(!("tools" in antNoTool), "toolBody with null tools omits tools (wrap-up path)");
+  const chatNoTool = JSON.parse(makeLLM("chat").toolBody("chat", [{ role: "user", content: "q" }], [], false));
+  ok(!("tools" in chatNoTool), "chat toolBody with empty tools omits tools");
+
+  // ---- reasoning: parse + echo back verbatim ----
+  const rp = La.parseToolCalls("anthropic", { content: [{ type: "thinking", thinking: "hmm", signature: "sig" }, { type: "text", text: "ans" }, { type: "tool_use", id: "t", name: "read_section", input: {} }] });
+  ok(rp.reasoning.length === 1 && rp.reasoning[0].type === "thinking", "parseToolCalls extracts thinking");
+  const amsgs = [];
+  La.pushAssistantToolTurn("anthropic", amsgs, rp);
+  ok(amsgs[0].content[0].type === "thinking" && amsgs[0].content[0].signature === "sig", "thinking echoed FIRST with signature");
+  const rmsgs = [];
+  La.pushAssistantToolTurn("responses", rmsgs, { text: "a", calls: [{ id: "c", name: "f", args: {} }], reasoning: [{ type: "reasoning", id: "r1" }] });
+  ok(rmsgs[0].type === "reasoning" && rmsgs.some((m) => m.type === "function_call"), "responses reasoning item pushed before function_call");
 
   // ---- stream deltas ----
   eq(L.streamDelta("chat", { choices: [{ delta: { content: "x" } }] }), "x", "chat stream delta");
