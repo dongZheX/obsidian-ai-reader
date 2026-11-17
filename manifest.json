@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-ai-reader",
+  "name": "AI Reader",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "AI-assisted paper reading inside Obsidian: grounded chat with click-to-source citations, AI highlights/notes written into the note, agentic read & annotate, figure vision, selection explain/translate, and selectable API formats.",
+  "author": "dongzhe05",
+  "authorUrl": "https://github.com/dongZheX/obsidian-ai-reader",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-ai-reader",
+  "version": "0.1.0",
+  "description": "AI reading assistant for Obsidian (port of zotero-ai-reader).",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node test/sim.js",
+    "deploy": "node scripts/deploy.mjs"
+  },
+  "keywords": ["obsidian", "ai", "reading", "llm"],
+  "author": "dongzhe05",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  }
+}
