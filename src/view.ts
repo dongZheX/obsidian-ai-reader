@@ -38,6 +38,8 @@ export class AIReaderView extends ItemView {
   private source: SourceDoc | null = null;
   streaming = false;
   cancel = false;
+  private waitTimer: any = null;
+  private drawT0 = 0;
   private lastRun: { keys: string[]; applied: any[] } | null = null;
   private redo: { applied: any[] } | null = null;
 
@@ -139,6 +141,20 @@ export class AIReaderView extends ItemView {
   private closeSkillMenu() { if (this.skillMenu) { const od = (this.skillMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.skillMenu.remove(); this.skillMenu = null; } }
 
   private setStatus(msg: string, kind?: string) { this.statusEl.setText(msg || ""); this.statusEl.className = "air-status" + (kind ? " air-status-" + kind : ""); }
+  // Elapsed-seconds ticker for silent waits (prefill before the first token, the
+  // blocking figure-vision call, tool execution). Turns a static "正在思考…" into
+  // "正在思考… · 8s" so a long wait reads as alive, not frozen.
+  private startWait(label: string) {
+    this.stopWait();
+    const t0 = Date.now();
+    const tick = () => {
+      const s = Math.round((Date.now() - t0) / 1000);
+      this.setStatus(s >= 1 ? label + " · " + s + "s" : label, "busy");
+      this.waitTimer = setTimeout(tick, 1000);
+    };
+    tick();
+  }
+  private stopWait() { if (this.waitTimer) { clearTimeout(this.waitTimer); this.waitTimer = null; } }
   private updateSendButton() { this.sendEl.setText(this.streaming ? "■" : "↑"); this.sendEl.toggleClass("air-send-stop", this.streaming); }
   private updateModelPill() { this.modelPillEl.setText((this.plugin.settings.model || "选择模型") + "  ·  " + this.plugin.llm.fmt() + "  ▾"); }
 
@@ -217,10 +233,11 @@ export class AIReaderView extends ItemView {
       else if (m.role === "assistant") { const { msg, bubble } = this.appendAssistant(); this.renderInto(bubble, String(m.content)); this.addActions(msg, String(m.content), lastUser); }
     }
   }
-  private appendUser(text: string) {
+  private appendUser(text: string): HTMLElement {
     const msg = this.msgsEl.createDiv("air-msg air-msg-user");
     msg.createDiv({ cls: "air-bubble", text });
     this.msgsEl.scrollTop = this.msgsEl.scrollHeight;
+    return msg;
   }
   private appendAssistant(): { msg: HTMLElement; bubble: HTMLElement } {
     const msg = this.msgsEl.createDiv("air-msg air-msg-assistant");
@@ -284,7 +301,7 @@ export class AIReaderView extends ItemView {
     const path = this.source.path;
     let hist = this.plugin.chatStore.get(path); if (!hist) { hist = []; this.plugin.chatStore.set(path, hist); }
 
-    if (!opts.skipUser) this.appendUser(text);
+    const userMsg = !opts.skipUser ? this.appendUser(text) : null;
     const { msg, bubble } = this.appendAssistant();
     bubble.addClass("air-streaming");
     this.streaming = true; this.cancel = false; this.updateSendButton();
@@ -332,7 +349,9 @@ export class AIReaderView extends ItemView {
       for (let round = 0; round < MAX_ROUNDS && !this.cancel; round++) {
         let acc = "", lastR = 0;
         const turnEl = answerEl;
+        this.startWait(round === 0 ? "正在思考…" : "继续生成…"); // ticks until the first token arrives
         const res = await this.plugin.llm.streamAnswer(withSys(), tools, (d) => {
+          this.stopWait();
           acc += d; const el = this.msgsEl;
           const stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 60;
           const now = Date.now();
@@ -340,11 +359,15 @@ export class AIReaderView extends ItemView {
           this.setStatus("生成中… " + acc.length + " 字", "busy");
           if (stick) el.scrollTop = el.scrollHeight;
         }, () => this.cancel, meta);
+        this.stopWait();
         turnEl.setText(res.text || "");
         if (res.calls && res.calls.length && !this.cancel) {
           this.plugin.llm.pushAssistantToolTurn(fmt, convo, { text: res.text, calls: res.calls, reasoning: res.reasoning });
-          ensureToolLog(); this.setStatus("调用工具中…", "busy");
+          ensureToolLog();
+          const hasVision = res.calls.some((c: any) => c.name === "view_figure");
+          this.startWait(hasVision ? "正在识读图表…" : "调用工具中…"); // vision is a blocking sub-call
           const results = await this.runToolCalls(tc, res.calls, toolLog, grp);
+          this.stopWait();
           this.plugin.llm.pushToolResults(fmt, convo, results);
           answerEl = bubble.createDiv("air-answer");
           this.msgsEl.scrollTop = this.msgsEl.scrollHeight;
@@ -358,7 +381,9 @@ export class AIReaderView extends ItemView {
       if (!full && !this.cancel) {
         convo.push({ role: "user", content: "请基于以上读取到的内容，给出完整、充分的回答。" });
         try {
-          const res2 = await this.plugin.llm.streamAnswer(withSys(), null, (d) => { answerEl.setText(answerEl.getText() + d); this.setStatus("整理回答…", "busy"); this.msgsEl.scrollTop = this.msgsEl.scrollHeight; }, () => this.cancel, meta);
+          this.startWait("整理回答…");
+          const res2 = await this.plugin.llm.streamAnswer(withSys(), null, (d) => { this.stopWait(); answerEl.setText(answerEl.getText() + d); this.setStatus("整理回答…", "busy"); this.msgsEl.scrollTop = this.msgsEl.scrollHeight; }, () => this.cancel, meta);
+          this.stopWait();
           full = res2.text || answerEl.getText() || "";
         } catch (e) {}
       }
@@ -376,16 +401,46 @@ export class AIReaderView extends ItemView {
       if (opts.autoApply && this.source.kind === "md") { const n = await this.autoApplyDirectives(full); this.setStatus(n ? "已自动高亮 " + n + " 处。" : "未识别到可高亮的句子。", n ? "ok" : "muted"); }
     } catch (e: any) {
       bubble.removeClass("air-streaming");
-      bubble.setText(this.cancel ? "（已停止）" : "Error: " + (e.message || e));
-    } finally { this.streaming = false; this.updateSendButton(); }
+      bubble.setText(this.cancel ? "（已停止）" : this.plugin.llm.friendlyError(e));
+      if (!this.cancel) this.addRetry(msg, userMsg, text, opts);
+    } finally { this.stopWait(); this.streaming = false; this.updateSendButton(); }
+  }
+
+  // A failed turn leaves the error bubble with a "重试" button: re-run the same
+  // question with the same options after cleaning up the failed turn. Nothing was
+  // committed to hist (that happens only on success); the live history is rolled
+  // back so the model doesn't see the aborted attempt.
+  private addRetry(errMsg: HTMLElement, userMsg: HTMLElement | null, text: string, opts: any) {
+    const row = errMsg.createDiv("air-actions");
+    const btn = row.createSpan({ cls: "air-action", text: "重试" });
+    btn.onclick = () => {
+      if (this.streaming) return;
+      errMsg.remove();
+      const entry = this.source ? this.plugin.liveStore.get(this.source.path) : null;
+      const msgs = entry ? entry.messages : null;
+      if (!opts.skipUser) {
+        if (userMsg) userMsg.remove();
+        // drop the failed user turn (+ any partial tool turns) from live; the re-send re-adds it
+        if (msgs) { for (let i = msgs.length - 1; i >= 0; i--) if (this.isUserTurn(msgs[i])) { msgs.splice(i); break; } }
+      } else if (msgs) {
+        this.rollbackLiveToLastUser(msgs); // regen-style: keep the user turn, drop its partials
+      }
+      this.send(text, opts);
+    };
   }
 
   private addMetaLine(msg: HTMLElement, meta: any, full: string) {
     const outTok = meta.outTok != null ? meta.outTok : Math.round([...(full || "")].length / 3);
     const inTok = meta.inTok != null ? "⬆ " + meta.inTok + " " : "";
     const approx = meta.outTok != null ? "" : "~";
-    const ctxk = meta.ctxChars != null ? " · 上下文 " + (meta.ctxChars >= 1000 ? (meta.ctxChars / 1000).toFixed(1) + "k" : meta.ctxChars) + " 字" : "";
-    msg.createDiv({ cls: "air-meta", text: inTok + "⬇ " + approx + outTok + " tok" + ctxk });
+    const kfmt = (n: number) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
+    const ctxk = meta.ctxChars != null ? " · 上下文 " + kfmt(meta.ctxChars) + " 字" : "";
+    // Show both cache read (multi-turn hit) and cache write (first turn) so
+    // prompt caching is visible either way.
+    let cache = "";
+    if (meta.cacheRead) cache += " · 命中缓存 " + kfmt(meta.cacheRead);
+    if (meta.cacheWrite) cache += " · 写缓存 " + kfmt(meta.cacheWrite);
+    msg.createDiv({ cls: "air-meta", text: inTok + "⬇ " + approx + outTok + " tok" + cache + ctxk });
   }
 
   // --------------------------------------------------------------- tool ctx

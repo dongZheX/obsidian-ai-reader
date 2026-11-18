@@ -112,6 +112,24 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   const chatNoTool = JSON.parse(makeLLM("chat").toolBody("chat", [{ role: "user", content: "q" }], [], false));
   ok(!("tools" in chatNoTool), "chat toolBody with empty tools omits tools");
 
+  // ---- cache usage capture (surfaced in the meta line) ----
+  { const mw = {}; La.captureUsage(mw, { usage: { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 2000 } });
+    ok(mw.cacheWrite === 2000, "cache_creation surfaced as cacheWrite (first turn)");
+    const mr = {}; La.captureUsage(mr, { usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 1800 } });
+    ok(mr.cacheRead === 1800, "cache_read surfaced as cacheRead (later turns)");
+    const mo = {}; L.captureUsage(mo, { usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 900 } } });
+    ok(mo.cacheRead === 900, "OpenAI cached_tokens surfaced as cacheRead"); }
+
+  // ---- friendlyError: actionable hint + raw text kept ----
+  { const f = (s) => L.friendlyError(new Error(s));
+    ok(/超时/.test(f("The operation was aborted")), "abort/timeout → 超时 hint");
+    ok(/Key/.test(f("HTTP 401 Unauthorized")), "401 → key hint");
+    ok(/限流|额度/.test(f("HTTP 429 rate limit")), "429 → rate-limit hint");
+    ok(/接口格式|格式/.test(f("Unexpected token < in JSON")), "non-JSON → format hint");
+    ok(/连不上|网络/.test(f("网络请求失败（已重试）：Failed to fetch")), "network → connectivity hint");
+    ok(f("Base URL 未设置") === "Base URL 未设置", "already-clear message passes through");
+    ok(/原始信息/.test(f("HTTP 401 Unauthorized")), "raw text appended for diagnosis"); }
+
   // ---- reasoning: parse + echo back verbatim ----
   const rp = La.parseToolCalls("anthropic", { content: [{ type: "thinking", thinking: "hmm", signature: "sig" }, { type: "text", text: "ans" }, { type: "tool_use", id: "t", name: "read_section", input: {} }] });
   ok(rp.reasoning.length === 1 && rp.reasoning[0].type === "thinking", "parseToolCalls extracts thinking");

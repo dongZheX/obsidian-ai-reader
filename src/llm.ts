@@ -4,7 +4,7 @@
 import { AIReaderSettings, ApiFormat, ChatMessage, ToolCall } from "./types";
 import { httpText, httpStreamLines } from "./net";
 
-export interface UsageMeta { inTok?: number; outTok?: number; ctxChars?: number; }
+export interface UsageMeta { inTok?: number; outTok?: number; ctxChars?: number; cacheRead?: number; cacheWrite?: number; }
 export interface StreamResult { text: string; calls: ToolCall[]; reasoning: any[]; }
 
 export class LLM {
@@ -144,6 +144,10 @@ export class LLM {
       if (u.input_tokens != null) meta.inTok = u.input_tokens;
       if (u.completion_tokens != null) meta.outTok = u.completion_tokens;
       if (u.output_tokens != null) meta.outTok = u.output_tokens;
+      // prompt-cache hits (Anthropic) / cached_tokens (OpenAI) so savings show
+      if (u.cache_read_input_tokens != null) meta.cacheRead = u.cache_read_input_tokens;
+      if (u.cache_creation_input_tokens != null) meta.cacheWrite = u.cache_creation_input_tokens;
+      if (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens != null) meta.cacheRead = u.prompt_tokens_details.cached_tokens;
     }
   }
 
@@ -169,6 +173,24 @@ export class LLM {
     catch (e) { throw new Error("响应不是 JSON（Base URL 或 API 格式可能不对）。实际返回：\n" + (raw || "").slice(0, 1200)); }
   }
   private fail(status: number, raw: string): Error { return new Error("HTTP " + status + "\n" + (raw || "").slice(0, 1200)); }
+
+  // Turn a raw error into a short, actionable Chinese hint (keeps the original
+  // text appended) so a wrong Base URL / format / key is diagnosable at a glance
+  // instead of a bare "Error: HTTP 401 …".
+  friendlyError(e: any): string {
+    const raw = (e && e.message) ? String(e.message) : String(e || "出错了");
+    const m = raw.toLowerCase();
+    if (/base url 未设置|api key 未设置/.test(raw)) return raw;
+    const tip = (t: string) => t + "\n\n（原始信息：" + raw.slice(0, 300) + "）";
+    if (/abort|timeout|timed ?out/.test(m)) return tip("请求超时。回答太长或网络较慢时容易这样——可以重试，或在设置里调小「最大发送字符数」。");
+    if (/http 401|http 403|unauthorized|forbidden|invalid.?api.?key|invalid_api_key/.test(m)) return tip("API Key 无效或没有权限。到设置里确认 Key，以及它是否对应当前 Base URL 的服务。");
+    if (/http 404|not found|no such|unknown model|does not exist/.test(m)) return tip("接口或模型找不到。检查 Base URL、「接口格式」和模型名是否匹配。");
+    if (/http 429|rate.?limit|too many requests|quota/.test(m)) return tip("触发限流或额度不足。稍等再试，或换一个 Key / 模型。");
+    if (/http 5\d\d|internal server|bad gateway|service unavailable|overloaded/.test(m)) return tip("服务端出错（5xx），通常是对面临时故障，稍后重试。");
+    if (/network|failed to fetch|fetch failed|enotfound|econnrefused|socket hang|dns|网络请求失败/.test(m)) return tip("连不上接口。检查网络、Base URL 是否正确、是否需要代理。");
+    if (/非 json|not json|unexpected token|无法从响应|无法提取/.test(m)) return tip("返回的内容不是预期格式。多半是 Base URL 或「接口格式」选错了（比如给 OpenAI 服务选了 Anthropic 格式）。");
+    return raw;
+  }
 
   // -------- tool-call stream accumulation / parsing (ported) --------
   streamToolDelta(fmt: ApiFormat, j: any, tc: Record<number, any>) {
