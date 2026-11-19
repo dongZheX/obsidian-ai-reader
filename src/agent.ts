@@ -6,6 +6,7 @@ import { ApiFormat, Block, Section } from "./types";
 import { figKind } from "./source";
 import { CATEGORY_LABELS, colorForCategory } from "./annotate";
 import { urlHost } from "./websearch";
+import { fmtPaperList, ScholarPaper } from "./scholar";
 
 export interface ToolBlockSpec {
   label: string;
@@ -32,6 +33,10 @@ export interface ToolCtx {
   serper?: boolean;
   webSearch?: (query: string, num?: number) => Promise<{ title: string; link: string; snippet: string }[]>;
   webFetch?: (url: string) => Promise<{ title: string; text: string }>;
+  // scholarly discovery (free APIs): query "" means the current paper
+  lookupPaper?: (query: string) => Promise<{ source: string; results: ScholarPaper[] }>;
+  findReferences?: (query: string) => Promise<ScholarPaper[]>;
+  relatedPapers?: (query: string) => Promise<{ related: ScholarPaper[]; citedBy: ScholarPaper[] }>;
   // session read-cache sinks (so later turns / the agent / explain can reuse)
   onRead?: (index: number, title: string, text: string) => void;
   onFigure?: (id: number, loc: string, desc: string) => void;
@@ -51,6 +56,11 @@ export function agentTools(opts?: { serper?: boolean }) {
     T.push({ name: "web_search", description: "联网搜索（Google via Serper）。当文档之外的背景、最新进展、术语定义、相关工作需要外部信息时使用。返回标题、链接、摘要。", parameters: { type: "object", properties: { query: { type: "string", description: "搜索关键词" }, num: { type: "integer", description: "返回条数，默认 6，最多 10" } }, required: ["query"] } });
   }
   T.push({ name: "web_fetch", description: "抓取某个网页 URL 并返回其正文文本（已去除导航/脚本）。常配合 web_search 使用：先搜索拿到链接，再抓取需要细读的页面。", parameters: { type: "object", properties: { url: { type: "string", description: "http(s) 网址" } }, required: ["url"] } });
+  // Scholarly discovery (free APIs, no key needed): look up a paper, trace its
+  // references, and find related / follow-up work via the citation graph.
+  T.push({ name: "lookup_paper", description: "按标题/DOI/arXiv id/主题查一篇论文的元数据（标题、作者、年份、venue、被引数、摘要、链接）。query 留空=当前论文。用于确认某篇论文是什么、或找某主题的代表作。", parameters: { type: "object", properties: { query: { type: "string", description: "论文标题 / DOI / arXiv id / 主题关键词；留空=当前论文" } }, required: [] } });
+  T.push({ name: "find_references", description: "列出一篇论文引用了哪些工作（参考文献）。query 留空=当前论文。用于回答『这篇基于哪些工作』『某条引用的原文是什么』。", parameters: { type: "object", properties: { query: { type: "string", description: "论文标题/DOI/arXiv；留空=当前论文" } }, required: [] } });
+  T.push({ name: "related_papers", description: "找与某篇论文相关的工作，以及后续引用了它的新工作。query 留空=当前论文。用于『有哪些相关/后续研究』。", parameters: { type: "object", properties: { query: { type: "string", description: "论文标题/DOI/arXiv；留空=当前论文" } }, required: [] } });
   T.push({ name: "finish", description: "读完并标注完后调用，结束。", parameters: { type: "object", properties: { note: { type: "string" } }, required: [] } });
   return T;
 }
@@ -124,6 +134,28 @@ export async function execTool(c: ToolCtx, call: { name: string; args: any }): P
       const { title, text } = await c.webFetch(url);
       return { output: JSON.stringify({ url, title, text }), render: { label: "抓取网页", brief: urlHost(url), outcome: "→ " + text.length + " 字", bodyText: (title ? title + "\n\n" : "") + text.slice(0, 2000) } };
     } catch (e: any) { return { output: JSON.stringify({ error: String(e.message || e) }), render: { label: "抓取网页", brief: urlHost(url), outcome: "✕ 失败" } }; }
+  }
+  if (name === "lookup_paper") {
+    const brief = (args.query || "当前论文");
+    if (!c.lookupPaper) return { output: JSON.stringify({ error: "lookup_paper unavailable" }), render: { label: "查论文", brief, outcome: "✕ 未配置" } };
+    try { const r = await c.lookupPaper(args.query || ""); const list = r.results || [];
+      return { output: JSON.stringify(list), render: { label: "查论文", brief, outcome: "→ " + list.length + " 条", bodyText: fmtPaperList(list) } };
+    } catch (e: any) { return { output: JSON.stringify({ error: String(e.message || e) }), render: { label: "查论文", brief, outcome: "✕ 失败" } }; }
+  }
+  if (name === "find_references") {
+    const brief = (args.query || "当前论文");
+    if (!c.findReferences) return { output: JSON.stringify({ error: "find_references unavailable" }), render: { label: "找参考文献", brief, outcome: "✕ 未配置" } };
+    try { const list = await c.findReferences(args.query || "");
+      return { output: JSON.stringify(list), render: { label: "找参考文献", brief, outcome: "→ " + list.length + " 条", bodyText: fmtPaperList(list) } };
+    } catch (e: any) { return { output: JSON.stringify({ error: String(e.message || e) }), render: { label: "找参考文献", brief, outcome: "✕ 失败" } }; }
+  }
+  if (name === "related_papers") {
+    const brief = (args.query || "当前论文");
+    if (!c.relatedPapers) return { output: JSON.stringify({ error: "related_papers unavailable" }), render: { label: "相关论文", brief, outcome: "✕ 未配置" } };
+    try { const r = await c.relatedPapers(args.query || "");
+      const body = "【相关】\n" + fmtPaperList(r.related) + "\n\n【后续引用】\n" + fmtPaperList(r.citedBy);
+      return { output: JSON.stringify(r), render: { label: "相关论文", brief, outcome: "→ " + (r.related.length + r.citedBy.length) + " 条", bodyText: body } };
+    } catch (e: any) { return { output: JSON.stringify({ error: String(e.message || e) }), render: { label: "相关论文", brief, outcome: "✕ 失败" } }; }
   }
   if (name === "finish") return { output: JSON.stringify({ ok: true }), render: { label: "完成", outcome: "✓" }, finish: true };
   return { output: JSON.stringify({ error: "unknown tool " + name }), render: { label: name, outcome: "✕ 未知工具" } };

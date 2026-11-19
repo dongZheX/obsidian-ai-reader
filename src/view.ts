@@ -9,6 +9,7 @@ import { CATEGORY_LABELS, colorForCategory } from "./annotate";
 import { isPdfView, extractPdfBlocks, pdfGoToPage } from "./pdf";
 import { saveConversationToNote } from "./notes";
 import { webSearch, webFetch } from "./websearch";
+import { lookupPaper, findReferences, relatedPapers } from "./scholar";
 import { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor, Preset } from "./skills";
 
 export const VIEW_TYPE = "ai-reader-view";
@@ -77,7 +78,8 @@ export class AIReaderView extends ItemView {
     const noteBtn = top.createDiv({ cls: "air-top-btn", text: "存为笔记" });
     noteBtn.onclick = () => this.saveNote();
     top.createDiv("air-spacer");
-    const gear = top.createDiv({ cls: "air-gear", text: "⚙" });
+    const gear = top.createDiv({ cls: "air-gear", text: "⚙ 设置" });
+    gear.title = "打开 AI Reader 设置";
     gear.onclick = () => (this.app as any).setting && (this.app as any).setting.open && ((this.app as any).setting.open(), (this.app as any).setting.openTabById(this.plugin.manifest.id));
 
     this.statusEl = root.createDiv("air-status");
@@ -327,6 +329,7 @@ export class AIReaderView extends ItemView {
         : "需要抓取某个网页正文时可用 web_fetch。";
       const toolNote = "\n\n上面的正文可能是节选。你可以调用工具查阅更多内容：list_sections 看章节结构；read_section 读取某一章拿到每句 id；list_figures 列出图表；view_figure 识读某张图/表；" +
         (canWrite ? "highlight 高亮某个句子 id（给 category 和一句话 reason）。" : "（当前文档为 PDF，不支持写入标注。）") + webNote +
+        "涉及参考文献、相关工作或后续研究时，可用 lookup_paper 查某篇论文、find_references 看本文引用了哪些工作、related_papers 找相关/后续论文（query 留空即当前论文）。" +
         (deep ? "【深读模式】回答前请主动用 list_sections + read_section 读取所有相关章节，并对相关图/表 view_figure。" : "当注入正文不足以准确回答、或涉及具体数据/图表时，请主动调用 read_section / view_figure 查阅后再答；普通问题可直接作答。");
       const sys = this.plugin.llm.systemPrompt(ctx, this.lang()) + toolNote + skillDirective(this.plugin.settings.skill) + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
       const fmt = this.plugin.llm.fmt();
@@ -463,16 +466,32 @@ export class AIReaderView extends ItemView {
       serper: !!(this.plugin.settings.serperKey || "").trim(),
       webSearch: (q, num) => webSearch(this.plugin.settings.serperKey, q, num),
       webFetch: (url) => webFetch(url),
+      // scholarly discovery: an empty query means "the current paper" — resolve
+      // its seed (frontmatter DOI/title, else filename) here so scholar.ts stays pure.
+      lookupPaper: (q) => lookupPaper(this.plugin.settings.serperKey, (q || "").trim() || this.currentPaperSeed()),
+      findReferences: (q) => findReferences((q || "").trim() || this.currentPaperSeed()),
+      relatedPapers: (q) => relatedPapers((q || "").trim() || this.currentPaperSeed()),
     };
   }
   private serperOn(): boolean { return !!(this.plugin.settings.serperKey || "").trim(); }
+  // Best-effort identifier for the open document: frontmatter DOI, else title,
+  // else the file basename. Used when a scholar tool is called with no query.
+  private currentPaperSeed(): string {
+    if (!this.source) throw new Error("没有打开的论文");
+    const fm = (this.source.file && this.app.metadataCache.getFileCache(this.source.file)?.frontmatter) || {};
+    const doi = (fm.doi || fm.DOI || "").toString().trim();
+    if (doi) return doi;
+    const arx = (fm.arxiv || fm.arXiv || "").toString().trim();
+    if (arx) return "arxiv:" + arx;
+    return (fm.title || this.source.file?.basename || "").toString().trim();
+  }
 
   // Run one round's tool calls. Read-only calls (sections/figures/web) run
   // concurrently up to maxParallelTools; side-effecting calls (highlight/finish)
   // stay serial and in order. Per-call failures become an error result. Tool
   // blocks render in the original call order. Ported from _runToolCalls.
   private async runToolCalls(tc: ToolCtx, calls: { id: string; name: string; args: any }[], logWrap: HTMLElement, grp: any): Promise<{ id: string; name: string; output: string; finish?: boolean }[]> {
-    const RO = new Set(["list_sections", "read_section", "list_figures", "view_figure", "web_search", "web_fetch"]);
+    const RO = new Set(["list_sections", "read_section", "list_figures", "view_figure", "web_search", "web_fetch", "lookup_paper", "find_references", "related_papers"]);
     const limit = Math.max(1, Number(this.plugin.settings.maxParallelTools) || 3);
     const slots: any[] = new Array(calls.length);
     const run1 = async (i: number) => {

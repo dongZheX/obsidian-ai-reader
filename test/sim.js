@@ -188,6 +188,45 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   const r3 = await m.execTool(tc2, { name: "web_fetch", args: { url: "ftp://nope" } });
   ok(/✕/.test(r3.render.outcome), "web_fetch rejects non-http url");
 
+  // ---- scholarly discovery: lookup_paper / find_references / related_papers ----
+  // present unconditionally (free APIs), in all 3 formats
+  { const names = m.agentTools().map((t) => t.name);
+    ok(names.includes("lookup_paper") && names.includes("find_references") && names.includes("related_papers"), "scholar tools always present"); }
+  for (const fmt of ["chat", "anthropic", "responses"]) {
+    const got = m.toolSchemas(fmt).map((t) => t.name || (t.function && t.function.name));
+    ok(got.includes("find_references"), "find_references in " + fmt + " schema");
+  }
+  // normS2 + fmtPaperList (pure)
+  { const n = m.normS2({ title: "T", authors: [{ name: "A" }, { name: "B" }], year: 2021, venue: "NeurIPS", citationCount: 42, externalIds: { DOI: "10.1/x", ArXiv: "2101.00001" }, url: "http://u" });
+    ok(n.title === "T" && n.authors.length === 2 && n.year === 2021 && n.citations === 42 && n.doi === "10.1/x" && n.arxiv === "2101.00001", "normS2 maps fields");
+    const body = m.fmtPaperList([n]);
+    ok(/1\. T/.test(body) && /A, B/.test(body) && /被引 42/.test(body), "fmtPaperList renders title+authors+citations");
+    ok(m.fmtPaperList([]) === "（无结果）", "fmtPaperList empty"); }
+  // execTool routes the 3 scholar tools via injected ctx fns
+  { const tcS = {
+      lookupPaper: async () => ({ source: "s2", results: [{ title: "P1", authors: ["X"], year: 2020, citations: 5 }] }),
+      findReferences: async () => [{ title: "Ref1", authors: ["Y"], year: 2018 }],
+      relatedPapers: async () => ({ related: [{ title: "Rel1" }], citedBy: [{ title: "Cite1" }, { title: "Cite2" }] }),
+    };
+    const rl = await m.execTool(tcS, { name: "lookup_paper", args: { query: "foo" } });
+    ok(/查论文/.test(rl.render.label) && JSON.parse(rl.output)[0].title === "P1", "lookup_paper routes + JSON output");
+    const rf = await m.execTool(tcS, { name: "find_references", args: {} });
+    ok(/找参考文献/.test(rf.render.label) && /1 条/.test(rf.render.outcome) && JSON.parse(rf.output)[0].title === "Ref1", "find_references routes");
+    const rr = await m.execTool(tcS, { name: "related_papers", args: {} });
+    ok(/相关论文/.test(rr.render.label) && /3 条/.test(rr.render.outcome) && JSON.parse(rr.output).citedBy.length === 2, "related_papers merges related+citedBy");
+    // soft error surfaces ✕ without throwing
+    const tcErr = { findReferences: async () => { throw new Error("Semantic Scholar 暂时限流"); } };
+    const re = await m.execTool(tcErr, { name: "find_references", args: {} });
+    ok(/✕ 失败/.test(re.render.outcome) && /error/.test(re.output), "find_references soft-fails on throttle");
+    // unavailable (no ctx fn) → ✕ 未配置
+    const rn = await m.execTool({}, { name: "lookup_paper", args: {} });
+    ok(/✕ 未配置/.test(rn.render.outcome), "lookup_paper unavailable when ctx fn missing"); }
+  // resolveId: DOI / arXiv pass through; title matched via S2 (not exercised — needs network)
+  { const doi = await m.resolveId("10.1145/3292500.3330701");
+    ok(doi === "DOI:10.1145/3292500.3330701", "resolveId DOI → DOI: id");
+    const arx = await m.resolveId("arXiv:2101.00001");
+    ok(arx === "ARXIV:2101.00001", "resolveId arXiv → ARXIV: id"); }
+
   // ---- reading skills ----
   ok(m.SKILLS.length === 8, "8 reading skills defined");
   ok(m.skillById("peer-review").label === "同行评审", "skillById resolves");

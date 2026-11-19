@@ -35,6 +35,7 @@ grounded in the actual document. Two things make it more than a chat box:
 | **Figure vision** | Embedded images (`![[fig.png]]`) are sent to a multimodal model instead of reading only the caption. |
 | **AI-drawn diagrams** | The model can illustrate flows/architecture/timelines by emitting a `svg` block, rendered inline as a sanitized vector image (`<script>`/`on*`/`javascript:` stripped). `mermaid` blocks render via Obsidian natively. |
 | **Web search & fetch** | Tools the model can call mid-answer: `web_search` (Google via Serper — set a Serper key) and `web_fetch` (read any page, always available) for background, latest work, or term definitions beyond the document. |
+| **Scholarly discovery** | Trace a paper's **references**, find **related & follow-up** work, and look up any paper by title/DOI/arXiv — via the free Semantic Scholar graph. With a Serper key, keyword lookup upgrades to Google Scholar (with citation counts). |
 | **Selection popup** | Select text in the editor to quote it to the sidebar, explain it (streaming, grounded), or translate it — plus right-click menu entries. |
 | **Your notes as context** | Reads your existing `==highlights==` / `<mark>` / `%%comments%%` so you can ask "summarize my highlights". |
 | **Persistence** | Conversation history is saved per note and restored next time. Save a conversation as a sibling note. |

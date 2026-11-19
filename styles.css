@@ -24,7 +24,7 @@
 .air-top-agent:hover { background: var(--air-accent); color: #fff; }
 .air-deep { font-size: 11px; }
 .air-deep-on { border-color: var(--color-green, #3fae5a); color: #fff; background: var(--color-green, #3fae5a); }
-.air-gear { margin-inline-start: auto; cursor: pointer; font-size: 15px; line-height: 1; padding: 4px; border-radius: 6px; opacity: .6; }
+.air-gear { margin-inline-start: auto; cursor: pointer; font-size: 12px; line-height: 1; padding: 5px 9px; border-radius: 6px; opacity: .85; border: 1px solid var(--background-modifier-border, rgba(127,127,127,0.25)); white-space: nowrap; }
 .air-gear:hover { opacity: 1; background: var(--air-bubble); }
 
 /* status */
@@ -35,14 +35,25 @@
 .air-status-busy { color: var(--air-accent); }
 
 /* messages */
-.air-chat-msgs { display: flex; flex-direction: column; gap: 12px; flex: 1 1 0; min-height: 60px; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 2px; scrollbar-width: thin; }
+.air-chat-msgs { display: flex; flex-direction: column; gap: 12px; flex: 1 1 0; min-height: 60px; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 4px 2px; scrollbar-width: thin; }
 .air-chat-msgs:empty::before { content: "问点什么，或点下面的快捷按钮 ✨"; margin: auto; color: var(--air-muted); font-size: 12px; text-align: center; }
-.air-msg { display: flex; }
+.air-msg { display: flex; min-width: 0; max-width: 100%; }
 .air-msg-user { justify-content: flex-end; }
 .air-msg-assistant { flex-direction: column; align-items: flex-start; }
-.air-bubble { max-width: 92%; padding: 9px 12px; border-radius: 14px; word-break: break-word; overflow-wrap: anywhere; }
+.air-bubble { max-width: 92%; padding: 9px 12px; border-radius: 14px; word-break: break-word; overflow-wrap: anywhere; min-width: 0; }
 .air-msg-user .air-bubble { background: var(--air-accent); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
 .air-msg-assistant .air-bubble { background: var(--air-bubble); border: 1px solid var(--air-border); border-bottom-left-radius: 4px; }
+/* Structural overflow fix (mirrors zotero): a DEFINITE-width assistant bubble so
+   an inner max-width:100% binds instead of falling back to a wide child's
+   min-content (long code line / wide cell) and widening the whole panel. Code
+   scrolls inside its box; tables fit-and-wrap (table-layout:fixed). */
+.air-msg-assistant .air-bubble { width: 100%; box-sizing: border-box; }
+/* GENERAL: every descendant is width-capped, shrinkable, and wraps long tokens. */
+.air-msg-assistant .air-bubble, .air-msg-assistant .air-bubble * { max-width: 100%; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+/* Two irreducible element overrides: <pre> (defaults to white-space:pre, never
+   wraps) and <table> (auto layout sizes to content) ignore the rules above. */
+.air-msg-assistant .air-bubble pre, .air-msg-assistant .air-bubble pre code { white-space: pre-wrap; }
+.air-msg-assistant .air-bubble table { table-layout: fixed; width: 100%; }
 .air-bubble.air-streaming { white-space: pre-wrap; }
 .air-bubble.air-streaming::after { content: "▋"; margin-inline-start: 1px; color: var(--air-accent); animation: air-blink 1s steps(2) infinite; }
 @keyframes air-blink { 0%,100% { opacity: .25; } 50% { opacity: .9; } }
