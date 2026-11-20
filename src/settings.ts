@@ -66,6 +66,13 @@ export class AIReaderSettingTab extends PluginSettingTab {
       .setName("Custom prompt").setDesc("附加到系统提示的自定义要求（不会覆盖引用/工具/画图规则）")
       .addTextArea((t) => { t.setPlaceholder("例如：多用例子；术语保留英文…").setValue(s.customPrompt).onChange(async (v) => { s.customPrompt = v; await save(); }); t.inputEl.rows = 3; t.inputEl.style.width = "100%"; });
 
+    new Setting(containerEl)
+      .setName("同步对话记录").setDesc("把每篇对话额外写到库内文件夹，随库同步（Obsidian Sync / iCloud / git）在多台机器间恢复。关闭则只存本地缓存。")
+      .addToggle((t) => t.setValue(s.syncChats).onChange(async (v) => { s.syncChats = v; await save(); }));
+    new Setting(containerEl)
+      .setName("同步文件夹").setDesc("库内存放同步副本的文件夹（相对库根目录）")
+      .addText((t) => t.setValue(s.syncFolder).onChange(async (v) => { s.syncFolder = (v || "").trim() || "AI Reader/chats"; await save(); }));
+
     const test = new Setting(containerEl).setName("Test connection");
     const result = test.descEl.createSpan({ text: "" });
     test.addButton((b) => b.setButtonText("Test").onClick(async () => {

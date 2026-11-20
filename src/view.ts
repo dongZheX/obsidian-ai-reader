@@ -2,8 +2,9 @@ import { ItemView, MarkdownView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import type AIReaderPlugin from "./main";
 import { Block, ChatMessage, Section } from "./types";
 import { parseMarkdownBlocks, buildSections, figKind, locLabel, hasLoc } from "./source";
-import { buildContextBounded, buildRetrievedContext } from "./retrieval";
+import { buildContextBounded, buildRetrievedContext, buildMultiContext } from "./retrieval";
 import { renderAssistant, RenderCtx } from "./render";
+import { newerBundle } from "./persist";
 import { agentTools, toolSchemas, execTool, ToolCtx, ToolBlockSpec } from "./agent";
 import { CATEGORY_LABELS, colorForCategory } from "./annotate";
 import { isPdfView, extractPdfBlocks, pdfGoToPage } from "./pdf";
@@ -11,6 +12,7 @@ import { saveConversationToNote } from "./notes";
 import { webSearch, webFetch } from "./websearch";
 import { lookupPaper, findReferences, relatedPapers } from "./scholar";
 import { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor, Preset } from "./skills";
+import { SHARE_FORMATS, ShareFormatId, ShareOutline, shareFormatList, buildOutlinePrompt, parseOutline, buildSectionPrompt, assembleShareHtml, stripHtmlFence, embedFigures, svgFencesToInline, wrapHtmlDoc } from "./share";
 
 export const VIEW_TYPE = "ai-reader-view";
 
@@ -35,8 +37,16 @@ export class AIReaderView extends ItemView {
   private modelMenu: HTMLElement | null = null;
   private modelList: string[] | null = null;
   private skillMenu: HTMLElement | null = null;
+  private shareBtn!: HTMLElement;
+  private shareMenu: HTMLElement | null = null;
 
   private source: SourceDoc | null = null;
+  // Multi-paper comparison: a session-only "basket" of other notes to ask across.
+  private basket: { path: string; title: string }[] = [];
+  private multiMode = false;
+  private cmpBtn!: HTMLElement;
+  private multiBtn!: HTMLElement;
+  private basketBarEl!: HTMLElement;
   streaming = false;
   cancel = false;
   private waitTimer: any = null;
@@ -56,7 +66,7 @@ export class AIReaderView extends ItemView {
     this.registerEvent(this.app.workspace.on("file-open", () => this.refresh()));
     await this.refresh();
   }
-  async onClose() { this.closeModelMenu(); this.closeSkillMenu(); }
+  async onClose() { this.closeModelMenu(); this.closeSkillMenu(); this.closeShareMenu(); }
 
   // --------------------------------------------------------------- skeleton
   private buildSkeleton() {
@@ -77,6 +87,18 @@ export class AIReaderView extends ItemView {
     this.skillBtn.onclick = (e) => { e.stopPropagation(); this.toggleSkillMenu(); };
     const noteBtn = top.createDiv({ cls: "air-top-btn", text: "存为笔记" });
     noteBtn.onclick = () => this.saveNote();
+    // one-click "share material" generator (one-pager / slides / HTML page)
+    this.shareBtn = top.createDiv({ cls: "air-top-btn air-sharebtn", text: "📄 分享 ▾" });
+    this.shareBtn.title = "把这篇论文一键生成可分享的材料";
+    this.shareBtn.onclick = (e) => { e.stopPropagation(); this.toggleShareMenu(); };
+    // multi-paper comparison: ➕ adds the current note to the basket; 跨论文 toggles
+    // cross-paper mode (questions answered across the basket).
+    this.cmpBtn = top.createDiv({ cls: "air-top-btn air-cmpbtn", text: "➕ 对比" });
+    this.cmpBtn.title = "把当前文档加入对比篮子（跨论文提问用）";
+    this.cmpBtn.onclick = () => this.basketToggle();
+    this.multiBtn = top.createDiv({ cls: "air-top-btn air-multibtn", text: "跨论文 关" });
+    this.multiBtn.title = "开启后，提问会跨对比篮子里的多篇文档综合/对比作答";
+    this.multiBtn.onclick = () => this.toggleMulti();
     top.createDiv("air-spacer");
     const gear = top.createDiv({ cls: "air-gear", text: "⚙ 设置" });
     gear.title = "打开 AI Reader 设置";
@@ -84,6 +106,9 @@ export class AIReaderView extends ItemView {
 
     this.statusEl = root.createDiv("air-status");
     this.msgsEl = root.createDiv("air-chat-msgs");
+
+    this.basketBarEl = root.createDiv("air-basketbar");
+    this.basketBarEl.style.display = "none";
 
     this.chipsEl = root.createDiv("air-chips");
     this.renderChips();
@@ -142,6 +167,24 @@ export class AIReaderView extends ItemView {
   }
   private closeSkillMenu() { if (this.skillMenu) { const od = (this.skillMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.skillMenu.remove(); this.skillMenu = null; } }
 
+  // ---- share-material menu (一页总结 / 幻灯片 / HTML) ----
+  private toggleShareMenu() {
+    if (this.shareMenu) { this.closeShareMenu(); return; }
+    this.closeModelMenu(); this.closeSkillMenu();
+    const menu = this.contentEl.createDiv("air-skillmenu air-sharemenu");
+    for (const f of shareFormatList()) {
+      const it = menu.createDiv({ cls: "air-skillitem" });
+      it.createDiv({ cls: "air-skillitem-t", text: f.label });
+      it.createDiv({ cls: "air-skillitem-d", text: f.desc });
+      it.onclick = (e) => { e.stopPropagation(); this.closeShareMenu(); this.generateShare(f.id); };
+    }
+    this.shareMenu = menu;
+    const onDoc = (ev: MouseEvent) => { if (this.shareMenu && !this.shareMenu.contains(ev.target as Node) && ev.target !== this.shareBtn) this.closeShareMenu(); };
+    (this.shareMenu as any)._onDoc = onDoc;
+    setTimeout(() => document.addEventListener("click", onDoc), 0);
+  }
+  private closeShareMenu() { if (this.shareMenu) { const od = (this.shareMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.shareMenu.remove(); this.shareMenu = null; } }
+
   private setStatus(msg: string, kind?: string) { this.statusEl.setText(msg || ""); this.statusEl.className = "air-status" + (kind ? " air-status-" + kind : ""); }
   // Elapsed-seconds ticker for silent waits (prefill before the first token, the
   // blocking figure-vision call, tool execution). Turns a static "正在思考…" into
@@ -187,14 +230,35 @@ export class AIReaderView extends ItemView {
     this.plugin.panels.set(res.file.path, this);
     this.setStatus("", "muted");
     await this.restoreChat();
+    this.updateCmpBtn(); this.renderBasket(); // reflect comparison-basket state for this doc
   }
 
   private async restoreChat() {
     if (!this.source) return;
     const path = this.source.path;
     let hist = this.plugin.chatStore.get(path);
-    if (!hist) { hist = (await this.plugin.persist.loadChat(path)) || []; this.plugin.chatStore.set(path, hist); }
+    if (!hist) {
+      const local = await this.plugin.persist.loadChatBundle(path);
+      let chosen = local;
+      // Multi-machine sync: if the in-vault synced copy is newer than the local
+      // cache (another machine wrote it), use it and backfill the local cache.
+      if (this.plugin.settings.syncChats) {
+        const synced = await this.plugin.persist.loadSyncedBundle(this.syncFolder(), path);
+        const pick = newerBundle(local, synced);
+        chosen = pick.bundle;
+        if (pick.fromSync && chosen) this.plugin.persist.saveChat(path, chosen.messages).catch(() => {});
+      }
+      hist = (chosen && chosen.messages) || [];
+      this.plugin.chatStore.set(path, hist);
+    }
     this.renderHistory(hist);
+  }
+  private syncFolder(): string { return (this.plugin.settings.syncFolder || "AI Reader/chats").trim() || "AI Reader/chats"; }
+  // Persist a conversation to BOTH the local cache and (when enabled) the
+  // in-vault synced copy, so a reload on any machine restores it.
+  private persistChat(path: string, hist: ChatMessage[]) {
+    this.plugin.persist.saveChat(path, hist).catch(() => {});
+    if (this.plugin.settings.syncChats) this.plugin.persist.saveSynced(this.syncFolder(), path, hist).catch(() => {});
   }
 
   private async ensureBlocks(): Promise<Block[]> {
@@ -294,9 +358,14 @@ export class AIReaderView extends ItemView {
   }
 
   // ------------------------------------------------------------------- send
-  private onSend() { const q = (this.inputEl.value || "").trim(); if (!q) return; this.inputEl.value = ""; this.inputEl.style.height = "auto"; this.send(q, { broad: false }); }
+  private onSend() {
+    const q = (this.inputEl.value || "").trim(); if (!q) return;
+    this.inputEl.value = ""; this.inputEl.style.height = "auto";
+    const multi = this.multiMode && this.basketList().length >= 2;
+    this.send(q, { broad: false, multi });
+  }
 
-  async send(text: string, opts: { broad?: boolean; skipUser?: boolean; autoApply?: boolean; annos?: boolean; withFigures?: boolean } = {}) {
+  async send(text: string, opts: { broad?: boolean; skipUser?: boolean; autoApply?: boolean; annos?: boolean; withFigures?: boolean; multi?: boolean } = {}) {
     if (!this.source) { new Notice("打开一篇笔记或 PDF 再提问。"); return; }
     if (!this.requireKey()) return;
     if (this.streaming) return;
@@ -311,27 +380,37 @@ export class AIReaderView extends ItemView {
     const meta: any = {};
     try {
       const blocks = await this.ensureBlocks();
-      let ctx = opts.broad ? buildContextBounded(blocks, this.maxChars()) : buildRetrievedContext(blocks, text, this.maxChars());
-      if (opts.annos && this.source.kind === "md") {
-        const ua = await this.plugin.annotator.getUserAnnotations(this.source.file);
-        if (ua.length) ctx = "【用户在笔记中的高亮与批注】（优先结合这些回答）：\n" + ua.join("\n") + "\n\n——\n\n正文：\n" + ctx;
-        else this.setStatus("这篇笔记还没有你的高亮/批注。", "muted");
-      }
-      if (opts.withFigures) { this.setStatus("正在识读图表…", "busy"); try { const fd = await this.figureDigest(2); if (fd) ctx = fd + "——\n\n正文：\n" + ctx; } catch (e) {} }
-      meta.ctxChars = ctx.length;
-      this.setStatus("生成中…", "busy");
       await this.compactHistory(path, hist);
       const sumNote = this.plugin.histSummary.get(path);
       const deep = this.plugin.deepRead;
-      const canWrite = this.source.kind === "md";
-      const webNote = this.serperOn()
-        ? "需要文档之外的背景、最新进展、术语或相关工作时，可用 web_search 联网搜索、web_fetch 抓取网页正文。"
-        : "需要抓取某个网页正文时可用 web_fetch。";
-      const toolNote = "\n\n上面的正文可能是节选。你可以调用工具查阅更多内容：list_sections 看章节结构；read_section 读取某一章拿到每句 id；list_figures 列出图表；view_figure 识读某张图/表；" +
-        (canWrite ? "highlight 高亮某个句子 id（给 category 和一句话 reason）。" : "（当前文档为 PDF，不支持写入标注。）") + webNote +
-        "涉及参考文献、相关工作或后续研究时，可用 lookup_paper 查某篇论文、find_references 看本文引用了哪些工作、related_papers 找相关/后续论文（query 留空即当前论文）。" +
-        (deep ? "【深读模式】回答前请主动用 list_sections + read_section 读取所有相关章节，并对相关图/表 view_figure。" : "当注入正文不足以准确回答、或涉及具体数据/图表时，请主动调用 read_section / view_figure 查阅后再答；普通问题可直接作答。");
-      const sys = this.plugin.llm.systemPrompt(ctx, this.lang()) + toolNote + skillDirective(this.plugin.settings.skill) + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
+      let sys: string;
+      if (opts.multi) {
+        // Multi-paper mode: retrieved excerpts from every basket doc, no
+        // single-paper agent tools, textual (论文i · 定位) citations.
+        this.setStatus("正在整理多篇文档…", "busy");
+        const mctx = await this.buildMultiContext(text);
+        meta.ctxChars = mctx.length;
+        sys = this.multiSystemPrompt(mctx, this.basketList().length) + skillDirective(this.plugin.settings.skill) + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
+      } else {
+        let ctx = opts.broad ? buildContextBounded(blocks, this.maxChars()) : buildRetrievedContext(blocks, text, this.maxChars());
+        if (opts.annos && this.source.kind === "md") {
+          const ua = await this.plugin.annotator.getUserAnnotations(this.source.file);
+          if (ua.length) ctx = "【用户在笔记中的高亮与批注】（优先结合这些回答）：\n" + ua.join("\n") + "\n\n——\n\n正文：\n" + ctx;
+          else this.setStatus("这篇笔记还没有你的高亮/批注。", "muted");
+        }
+        if (opts.withFigures) { this.setStatus("正在识读图表…", "busy"); try { const fd = await this.figureDigest(2); if (fd) ctx = fd + "——\n\n正文：\n" + ctx; } catch (e) {} }
+        meta.ctxChars = ctx.length;
+        const canWrite = this.source.kind === "md";
+        const webNote = this.serperOn()
+          ? "需要文档之外的背景、最新进展、术语或相关工作时，可用 web_search 联网搜索、web_fetch 抓取网页正文。"
+          : "需要抓取某个网页正文时可用 web_fetch。";
+        const toolNote = "\n\n上面的正文可能是节选。你可以调用工具查阅更多内容：list_sections 看章节结构；read_section 读取某一章拿到每句 id；list_figures 列出图表；view_figure 识读某张图/表；" +
+          (canWrite ? "highlight 高亮某个句子 id（给 category 和一句话 reason）。" : "（当前文档为 PDF，不支持写入标注。）") + webNote +
+          "涉及参考文献、相关工作或后续研究时，可用 lookup_paper 查某篇论文、find_references 看本文引用了哪些工作、related_papers 找相关/后续论文（query 留空即当前论文）。" +
+          (deep ? "【深读模式】回答前请主动用 list_sections + read_section 读取所有相关章节，并对相关图/表 view_figure。" : "当注入正文不足以准确回答、或涉及具体数据/图表时，请主动调用 read_section / view_figure 查阅后再答；普通问题可直接作答。");
+        sys = this.plugin.llm.systemPrompt(ctx, this.lang()) + toolNote + skillDirective(this.plugin.settings.skill) + (sumNote ? "\n\n【早期对话要点】\n" + sumNote : "");
+      }
+      this.setStatus("生成中…", "busy");
       const fmt = this.plugin.llm.fmt();
       // Continuous agentic context: one live message history (incl. tool turns)
       // persists across questions; compact it when it grows too large. Tool
@@ -342,7 +421,7 @@ export class AIReaderView extends ItemView {
       if (!opts.skipUser) convo.push({ role: "user", content: text });
       const withSys = (): ChatMessage[] => [{ role: "system", content: sys }, ...convo];
 
-      const tools = toolSchemas(fmt, { serper: this.serperOn() });
+      const tools = opts.multi ? null : toolSchemas(fmt, { serper: this.serperOn() }); // multi-paper: context pre-assembled, no single-paper tools
       const tc = this.buildToolCtx(blocks);
       const toolLog = createDiv("air-toollog"); let toolLogAdded = false; const grp: any = {};
       const ensureToolLog = () => { if (!toolLogAdded) { bubble.appendChild(toolLog); toolLogAdded = true; } };
@@ -400,7 +479,7 @@ export class AIReaderView extends ItemView {
       convo.push({ role: "assistant", content: full }); // final text turn into the live history
       if (!opts.skipUser) hist.push({ role: "user", content: text });
       hist.push({ role: "assistant", content: full });
-      this.plugin.persist.saveChat(path, hist).catch(() => {});
+      this.persistChat(path, hist);
       if (opts.autoApply && this.source.kind === "md") { const n = await this.autoApplyDirectives(full); this.setStatus(n ? "已自动高亮 " + n + " 处。" : "未识别到可高亮的句子。", n ? "ok" : "muted"); }
     } catch (e: any) {
       bubble.removeClass("air-streaming");
@@ -484,6 +563,90 @@ export class AIReaderView extends ItemView {
     const arx = (fm.arxiv || fm.arXiv || "").toString().trim();
     if (arx) return "arxiv:" + arx;
     return (fm.title || this.source.file?.basename || "").toString().trim();
+  }
+
+  // ----------------------------------------------- 多篇对比（对比篮子, Feature A）
+  // Session-only basket of docs to ask across. The open doc is always folded in,
+  // so you add the OTHER docs, not the one you're reading.
+  private basketList(): { path: string; title: string }[] {
+    const list = this.basket.slice();
+    const cur = this.source && this.source.path;
+    if (cur && !list.some((p) => p.path === cur)) {
+      const title = (this.source!.file && this.source!.file.basename) || "当前文档";
+      list.unshift({ path: cur, title });
+    }
+    return list;
+  }
+  private basketToggle() {
+    if (!this.source) return;
+    const path = this.source.path;
+    const i = this.basket.findIndex((p) => p.path === path);
+    if (i >= 0) this.basket.splice(i, 1);
+    else this.basket.push({ path, title: (this.source.file && this.source.file.basename) || "未命名" });
+    this.renderBasket(); this.updateCmpBtn();
+  }
+  private updateCmpBtn() {
+    if (!this.cmpBtn) return;
+    const inB = !!(this.source && this.basket.some((p) => p.path === this.source!.path));
+    this.cmpBtn.setText(inB ? "✓ 已加入" : "➕ 对比");
+    this.cmpBtn.toggleClass("air-cmpbtn-on", inB);
+  }
+  private toggleMulti() {
+    this.multiMode = !this.multiMode;
+    this.multiBtn.setText("跨论文 " + (this.multiMode ? "开" : "关"));
+    this.multiBtn.toggleClass("air-multibtn-on", this.multiMode);
+    const n = this.basketList().length;
+    if (this.multiMode && n < 2) this.setStatus("跨论文已开：用 ➕ 对比 把要对比的文档加入篮子（至少 2 篇）。", "muted");
+    else if (this.multiMode) this.setStatus("跨论文已开：提问将综合 " + n + " 篇文档。", "muted");
+    else this.setStatus("跨论文已关。", "muted");
+    this.renderBasket();
+  }
+  private renderBasket() {
+    const bar = this.basketBarEl; if (!bar) return;
+    bar.empty();
+    if (!this.basket.length) { bar.style.display = "none"; return; }
+    bar.style.display = "";
+    bar.createSpan({ cls: "air-basket-label", text: "对比(" + this.basket.length + ")" + (this.multiMode ? " · 跨论文已开" : "") });
+    for (const p of this.basket) {
+      const chip = bar.createSpan("air-basket-chip");
+      chip.createSpan({ cls: "air-basket-chip-t", text: (p.title || "未命名").slice(0, 32) });
+      const x = chip.createSpan({ cls: "air-basket-x", text: "✕" });
+      x.title = "移除";
+      x.onclick = () => { const i = this.basket.findIndex((q) => q.path === p.path); if (i >= 0) this.basket.splice(i, 1); this.renderBasket(); this.updateCmpBtn(); };
+    }
+    const clr = bar.createSpan({ cls: "air-basket-clear", text: "清空对比" });
+    clr.onclick = () => { this.basket = []; this.renderBasket(); this.updateCmpBtn(); };
+  }
+  // Blocks for any basket doc: current uses live blocks; others come from the
+  // block store, else a fresh parse of the vault file (cached).
+  private async basketBlocks(path: string): Promise<Block[]> {
+    if (this.source && path === this.source.path && this.source.blocks && this.source.blocks.length) return this.source.blocks;
+    let blocks = this.plugin.blockStore.get(path) || null;
+    if (blocks && blocks.length) return blocks;
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) {
+      try { const text = await this.app.vault.read(f); blocks = parseMarkdownBlocks(text); } catch (e) { blocks = []; }
+    }
+    if (blocks && blocks.length) this.plugin.blockStore.set(path, blocks);
+    return blocks || [];
+  }
+  // Labelled multi-doc context: for each basket doc, the most query-relevant
+  // excerpt (budget = maxChars/N). Block ids collide across docs, so strip the
+  // [B<id> …] prefix and keep the loc label → textual citations.
+  private async buildMultiContext(query: string): Promise<string> {
+    const list = this.basketList();
+    const papers: { title: string; blocks: Block[] }[] = [];
+    for (const p of list) papers.push({ title: p.title, blocks: await this.basketBlocks(p.path) });
+    return buildMultiContext(papers, query, this.maxChars());
+  }
+  private multiSystemPrompt(ctx: string, n: number): string {
+    const lang = this.lang();
+    return "你是学术论文对比阅读助手，用" + lang + "回答。下面给出了 " + n + " 篇文档各自的相关片段（按『【论文 i · 标题】』分节，片段中的 (L行号/p页码) 为定位）。要求：\n" +
+      "1) 基于这些片段对比/综合作答，明确区分每篇的观点与贡献，不要混淆来源。\n" +
+      "2) 引用某篇时写（论文i · 定位），不要用 [B<id>] 这类单篇徽标。\n" +
+      "3) 片段可能是节选；信息不足以回答时如实说明，不要臆造。\n" +
+      "4) 适合时用表格并列对比各篇的方法/数据/结论。\n\n" +
+      "各篇文档相关片段：\n\n" + ctx;
   }
 
   // Run one round's tool calls. Read-only calls (sections/figures/web) run
@@ -750,7 +913,7 @@ export class AIReaderView extends ItemView {
       const ans = await this.plugin.llm.callLLM(vm);
       bubble.empty(); await this.renderInto(bubble, ans); this.addActions(msg, ans, null);
       const hist = this.plugin.chatStore.get(this.source!.path)!; hist.push({ role: "user", content: "看图解释 " + locLabel(block) }); hist.push({ role: "assistant", content: ans });
-      this.plugin.persist.saveChat(this.source!.path, hist).catch(() => {});
+      this.persistChat(this.source!.path, hist);
     } catch (e: any) { bubble.setText("看图失败: " + (e.message || e)); }
   }
 
@@ -795,7 +958,7 @@ export class AIReaderView extends ItemView {
     this.plugin.readStore.delete(path);
     this.plugin.figStore.delete(path);
     this.plugin.histSummary.delete(path);
-    this.plugin.persist.saveChat(path, []).catch(() => {});
+    this.persistChat(path, []);
     this.msgsEl.empty(); this.setStatus("已清空对话。", "muted");
   }
 
@@ -872,6 +1035,166 @@ export class AIReaderView extends ItemView {
       const f = await saveConversationToNote(this.app, this.source.file, hist, this.plugin.settings.model);
       this.setStatus("已存为笔记：" + f.basename, "ok");
     } catch (e: any) { this.setStatus("存笔记失败: " + (e.message || e), "error"); }
+  }
+
+  // ------------------------------------------------ share-material generation
+  // Generate a shareable artifact from the whole paper (one-pager / slides /
+  // HTML). Runs its own streamed turn; it does NOT touch the Q&A history or the
+  // synced chat note — the result is saved to its own file under the share folder.
+  async generateShare(fmt: ShareFormatId) {
+    if (!this.source) { new Notice("打开一篇笔记或 PDF 再生成。"); return; }
+    if (!this.requireKey()) return;
+    if (this.streaming) return;
+    const spec = SHARE_FORMATS[fmt];
+    const { msg, bubble } = this.appendAssistant();
+    this.appendUser("📄 生成分享材料：" + spec.label); // a visible marker (not persisted to hist)
+    bubble.addClass("air-streaming");
+    this.streaming = true; this.cancel = false; this.updateSendButton();
+    const meta: any = {};
+    try {
+      const blocks = await this.ensureBlocks();
+      if (fmt === "html") { await this.runHtmlShare(bubble, msg, blocks); this.setStatus("", ""); return; }
+      // one-pager: single streamed pass (readable Markdown).
+      let ctx = buildContextBounded(blocks, this.maxChars());
+      try { const fd = await this.figureDigest(4); if (fd) ctx = fd + "——\n\n正文：\n" + ctx; } catch (e) {}
+      const msgs: ChatMessage[] = [{ role: "system", content: spec.buildSystemPrompt(this.lang()) }, { role: "user", content: "论文内容：\n\n" + ctx }];
+      this.startWait("正在生成" + spec.label + "…");
+      let acc = "";
+      const res = await this.plugin.llm.streamAnswer(msgs, null, (d) => {
+        this.stopWait(); acc += d;
+        const el = this.msgsEl; const stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 60;
+        bubble.setText(acc); this.setStatus("生成中… " + acc.length + " 字", "busy");
+        if (stick) el.scrollTop = el.scrollHeight;
+      }, () => this.cancel, meta);
+      this.stopWait();
+      bubble.removeClass("air-streaming"); bubble.empty();
+      await this.finishShareText(bubble, msg, fmt, (res.text || acc || "").trim());
+      this.setStatus("", "");
+    } catch (e: any) {
+      bubble.removeClass("air-streaming");
+      bubble.setText(this.cancel ? "（已停止）" : this.plugin.llm.friendlyError(e));
+    } finally { this.stopWait(); this.streaming = false; this.updateSendButton(); }
+  }
+
+  // Rich HTML, built section-by-section: plan an outline, then generate each
+  // section with its own focused context — deeper output, and the panel shows a
+  // live checklist of which part is being written right now.
+  private async runHtmlShare(bubble: HTMLElement, msg: HTMLElement, blocks: Block[]) {
+    const lang = this.lang();
+    const figList = this.figureListText(blocks);
+    // 1) outline
+    this.startWait("正在规划结构…"); bubble.setText("正在规划结构…");
+    const planCtx = buildContextBounded(blocks, Math.min(this.maxChars(), 40000));
+    const planRes = await this.plugin.llm.callLLM([{ role: "system", content: buildOutlinePrompt(lang) }, { role: "user", content: "论文内容：\n\n" + planCtx }]);
+    this.stopWait();
+    const outline = parseOutline(planRes || "");
+    if (!outline) { // fallback: single-shot rich HTML
+      bubble.setText("正在生成 HTML 分享页…"); this.startWait("正在生成 HTML…");
+      const one = await this.plugin.llm.callLLM([{ role: "system", content: SHARE_FORMATS.html.buildSystemPrompt(lang) }, { role: "user", content: "论文内容：\n\n" + planCtx }]);
+      this.stopWait();
+      await this.finishShareHtml(bubble, msg, { title: (this.source && this.source.file && this.source.file.basename) || "论文分享", tldr: "", tags: [], sections: [] }, [stripHtmlFence(one || "")]);
+      return;
+    }
+    // 2) each section, with a live checklist
+    bubble.empty();
+    const list = bubble.createDiv("air-share-checklist");
+    const rows = outline.sections.map((s) => { const r = list.createDiv({ cls: "air-share-step", text: "○ " + s.title }); return r; });
+    const sectionHtmls: string[] = [];
+    for (let i = 0; i < outline.sections.length && !this.cancel; i++) {
+      const s = outline.sections[i];
+      rows[i].setText(s.title); rows[i].addClass("air-share-step-cur"); // spinner drawn via CSS ::before
+      this.startWait("正在生成：" + s.title + "（" + (i + 1) + "/" + outline.sections.length + "）");
+      const secCtx = buildRetrievedContext(blocks, s.title + " " + s.brief, Math.min(this.maxChars(), 24000));
+      let acc = "";
+      const res = await this.plugin.llm.streamAnswer(
+        [{ role: "system", content: buildSectionPrompt(lang, s, figList) }, { role: "user", content: "论文内容：\n\n" + secCtx }],
+        null,
+        (d) => { this.stopWait(); acc += d; this.setStatus("正在生成：" + s.title + "（" + (i + 1) + "/" + outline.sections.length + "）… " + acc.length + " 字", "busy"); },
+        () => this.cancel, {} as any,
+      );
+      this.stopWait();
+      sectionHtmls.push(stripHtmlFence(res.text || acc || ""));
+      rows[i].setText("✓ " + s.title); rows[i].removeClass("air-share-step-cur"); rows[i].addClass("air-share-step-done");
+    }
+    if (this.cancel) { bubble.createEl("div", { cls: "air-meta", text: "（已停止）" }); return; }
+    await this.finishShareHtml(bubble, msg, outline, sectionHtmls);
+  }
+
+  // A compact list of the paper's figures/tables so a section prompt can place
+  // [[fig:id]] where it fits.
+  private figureListText(blocks: Block[]): string {
+    const figs = (blocks || []).filter((b) => b.type === "image" || b.type === "table").slice(0, 20);
+    if (!figs.length) return "（无）";
+    return figs.map((b) => "[[fig:" + b.id + "]] " + (b.type === "table" ? "表" : "图") + "：" + ((b.text || "").slice(0, 60) || "(无标题)")).join("\n");
+  }
+
+  // one-pager / slides: render as markdown + offer "保存到文件".
+  private async finishShareText(bubble: HTMLElement, msg: HTMLElement, fmt: ShareFormatId, text: string) {
+    await this.renderInto(bubble, text);
+    const row = msg.createDiv("air-actions");
+    const copy = row.createSpan({ cls: "air-action", text: "复制" });
+    copy.onclick = () => { navigator.clipboard.writeText(text); copy.setText("已复制"); setTimeout(() => copy.setText("复制"), 1200); };
+    const save = row.createSpan({ cls: "air-action", text: "保存到文件" });
+    save.onclick = async () => {
+      save.setText("保存中…");
+      try { const p = await this.writeShareFile(SHARE_FORMATS[fmt].ext, text); save.setText("✓ " + p); }
+      catch (e: any) { save.setText("保存失败"); new Notice(String(e.message || e)); }
+    };
+  }
+
+  // HTML: assemble header + TOC + sections, embed real figures + inline SVGs,
+  // wrap in the standalone template, write the file, and open it externally.
+  private async finishShareHtml(bubble: HTMLElement, msg: HTMLElement, outline: ShareOutline, sectionHtmls: string[]) {
+    this.setStatus("正在嵌入图表…", "busy");
+    const fragment = assembleShareHtml(outline, sectionHtmls);
+    const canFig = this.source && this.source.kind === "md";
+    let body = await embedFigures(fragment, async (id) => {
+      if (!canFig) return null;
+      const b = (this.source!.blocks || []).find((x) => x.id === id);
+      if (!b) return null;
+      try { return await this.figureDataURI(b); } catch (e) { return null; }
+    });
+    body = svgFencesToInline(body);
+    const title = outline.title || (this.source && this.source.file && this.source.file.basename) || "论文分享";
+    const html = wrapHtmlDoc(title, body);
+    bubble.createEl("div", { cls: "air-meta", text: "HTML 分享页已生成（" + (sectionHtmls.length) + " 个章节）。" });
+    const row = msg.createDiv("air-actions");
+    const open = row.createSpan({ cls: "air-action", text: "打开" });
+    open.onclick = async () => {
+      try { const abs = await this.writeShareFileAbs(SHARE_FORMATS.html.ext, html); this.openExternally(abs); }
+      catch (e: any) { new Notice(String(e.message || e)); }
+    };
+    const copy = row.createSpan({ cls: "air-action", text: "复制 HTML" });
+    copy.onclick = () => { navigator.clipboard.writeText(html); copy.setText("已复制"); setTimeout(() => copy.setText("复制 HTML"), 1200); };
+    // write immediately so the file exists even if the user doesn't click 打开
+    try { await this.writeShareFileAbs(SHARE_FORMATS.html.ext, html); } catch (e) {}
+  }
+
+  private shareFolder(): string { return "AI Reader/shares"; }
+  private shareRelPath(ext: string): string {
+    const base = ((this.source && this.source.file && this.source.file.basename) || "share").replace(/[\\/:*?"<>|]+/g, "_");
+    return this.shareFolder() + "/" + base + "." + ext;
+  }
+  // Write under the vault; returns the vault-relative path.
+  private async writeShareFile(ext: string, content: string): Promise<string> {
+    const a = this.app.vault.adapter;
+    const parts = this.shareFolder().split("/"); let cur = "";
+    for (const seg of parts) { cur = cur ? cur + "/" + seg : seg; if (!(await a.exists(cur))) { try { await a.mkdir(cur); } catch (e) {} } }
+    const rel = this.shareRelPath(ext);
+    await a.write(rel, content);
+    return rel;
+  }
+  private async writeShareFileAbs(ext: string, content: string): Promise<string> {
+    const rel = await this.writeShareFile(ext, content);
+    const base = (this.app.vault.adapter as any).getBasePath ? (this.app.vault.adapter as any).getBasePath() : "";
+    return base ? base + "/" + rel : rel;
+  }
+  private openExternally(absPath: string) {
+    try {
+      const electron = (window as any).require && (window as any).require("electron");
+      if (electron && electron.shell && electron.shell.openPath) { electron.shell.openPath(absPath); return; }
+    } catch (e) {}
+    new Notice("已生成：" + absPath);
   }
 
   // Compact long histories into a rolling summary (ported _compactHistory).

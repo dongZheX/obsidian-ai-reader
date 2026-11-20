@@ -14,6 +14,8 @@ export interface AIReaderSettings {
   skill: string;           // active reading-skill id
   customPrompt: string;    // user-defined extra instructions
   maxParallelTools: number; // concurrency for read-only tool calls
+  syncChats: boolean;      // mirror conversation history to an in-vault folder (so vault sync carries it across machines)
+  syncFolder: string;      // in-vault folder for the synced chat copies
 }
 
 export const DEFAULT_SETTINGS: AIReaderSettings = {
@@ -29,6 +31,8 @@ export const DEFAULT_SETTINGS: AIReaderSettings = {
   skill: "deep-read",
   customPrompt: "",
   maxParallelTools: 3,
+  syncChats: true,
+  syncFolder: "AI Reader/chats",
 };
 
 export type BlockType = "heading" | "paragraph" | "table" | "image" | "math" | "code";

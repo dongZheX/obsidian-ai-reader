@@ -1,5 +1,5 @@
 export { parseMarkdownBlocks, splitSentences, buildSections, figKind, figIndex, locLabel, hasLoc } from "../src/source";
-export { tokenize, buildContext, buildContextBounded, buildRetrievedContext } from "../src/retrieval";
+export { tokenize, buildContext, buildContextBounded, buildRetrievedContext, buildMultiContext } from "../src/retrieval";
 export { LLM } from "../src/llm";
 export { toolSchemas, agentTools, execTool } from "../src/agent";
 export { maskTokens } from "../src/render";
@@ -7,3 +7,5 @@ export { DEFAULT_SETTINGS } from "../src/types";
 export { htmlToText, decodeEntities, urlHost } from "../src/websearch";
 export { normS2, resolveId, fmtPaperList, lookupPaper, findReferences, relatedPapers } from "../src/scholar";
 export { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor } from "../src/skills";
+export { newerBundle } from "../src/persist";
+export { SHARE_FORMATS, shareFormatList, embedFigures, svgFencesToInline, wrapHtmlDoc, buildOutlinePrompt, parseOutline, buildSectionPrompt, buildHeaderHtml, buildTocHtml, stripHtmlFence, assembleShareHtml } from "../src/share";

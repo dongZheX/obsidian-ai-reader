@@ -75,3 +75,25 @@ export function buildRetrievedContext(blocks: Block[], query: string, maxChars: 
   if (lines.length < 3) return buildContextBounded(blocks, maxChars);
   return lines.join("\n") + figIndex(blocks);
 }
+
+// Multi-paper comparison context (Feature A). For each paper, take its most
+// query-relevant excerpt within a per-paper budget (maxChars / N), label it
+// 【论文 i · 标题】, and join with separators. Block ids collide across papers,
+// so the [B<id> …] prefix is stripped to (定位) — citations are textual, not
+// clickable badges. Pure so it's unit-testable.
+export function buildMultiContext(papers: { title: string; blocks: Block[] }[], query: string, maxChars: number): string {
+  const N = papers.length || 1;
+  const per = Math.max(2000, Math.floor(maxChars / N) - 200);
+  const parts: string[] = [];
+  papers.forEach((p, i) => {
+    let body: string;
+    if (!p.blocks || !p.blocks.length) body = "（无法提取正文）";
+    else {
+      let ex = buildRetrievedContext(p.blocks, query, per).replace(/\[B\d+\s+([^\]]*)\]/g, "($1)");
+      if (ex.length > per) ex = ex.slice(0, per) + "\n…（略）";
+      body = ex;
+    }
+    parts.push("【论文 " + (i + 1) + " · " + (p.title || "未命名") + "】\n" + body);
+  });
+  return parts.join("\n\n———\n\n");
+}

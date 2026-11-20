@@ -227,6 +227,76 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
     const arx = await m.resolveId("arXiv:2101.00001");
     ok(arx === "ARXIV:2101.00001", "resolveId arXiv → ARXIV: id"); }
 
+  // ---- multi-paper comparison context (Feature A) ----
+  {
+    const b1 = m.parseMarkdownBlocks("# Vision\n\nThe vision encoder uses a transformer. It beats the baseline on ImageNet.");
+    const b2 = m.parseMarkdownBlocks("# Language\n\nThe language model uses a transformer. It was pretrained on web text.");
+    const mc = m.buildMultiContext([{ title: "Paper A", blocks: b1 }, { title: "Paper B", blocks: b2 }], "transformer pretraining", 60000);
+    ok(/【论文 1 · Paper A】/.test(mc) && /【论文 2 · Paper B】/.test(mc), "multi context labels each paper");
+    ok(!/\[B\d+/.test(mc), "multi context strips colliding [B id] badges");
+    ok(/\(L\d+\)/.test(mc), "multi context keeps textual (L行号) locations");
+    ok(mc.length <= 60000, "multi context within maxChars budget");
+    // empty paper degrades gracefully
+    const mc2 = m.buildMultiContext([{ title: "Paper A", blocks: b1 }, { title: "Empty", blocks: [] }], "transformer", 60000);
+    ok(/（无法提取正文）/.test(mc2), "multi context notes an unextractable paper");
+    // per-paper budget shrinks with N (maxChars / N)
+    const mcTiny = m.buildMultiContext([{ title: "A", blocks: b1 }, { title: "B", blocks: b2 }], "transformer", 6000);
+    ok(mcTiny.length <= 6000, "tiny budget respected across papers");
+  }
+
+  // ---- conversation backup / multi-machine sync (Feature B) ----
+  {
+    const local = { version: 1, date: "2026-01-01T00:00:00.000Z", messages: [{ role: "user", content: "old" }] };
+    const synced = { version: 1, date: "2026-02-01T00:00:00.000Z", messages: [{ role: "user", content: "new" }] };
+    ok(m.newerBundle(local, synced).fromSync === true, "newerBundle picks the newer synced copy");
+    ok(m.newerBundle(local, synced).bundle.messages[0].content === "new", "newer bundle carries the newer messages");
+    ok(m.newerBundle(synced, local).fromSync === false, "newerBundle keeps local when local is newer");
+    ok(m.newerBundle(local, null).bundle === local && !m.newerBundle(local, null).fromSync, "newerBundle falls back to local when no synced copy");
+    ok(m.newerBundle(null, synced).fromSync === true, "newerBundle uses synced when no local copy");
+    ok(m.newerBundle(null, null).bundle === null, "newerBundle null-safe when neither exists");
+    // tie (equal dates) keeps local — avoids ping-ponging an unchanged copy
+    const same = { version: 1, date: local.date, messages: [{ role: "user", content: "same" }] };
+    ok(m.newerBundle(local, same).fromSync === false, "newerBundle keeps local on a date tie");
+  }
+
+  // ---- share-material generator ----
+  {
+    const list = m.shareFormatList();
+    ok(list.length === 2 && list.map((f) => f.id).join(",") === "onepager,html", "2 share formats registered (no slides)");
+    ok(list.every((f) => f.label && f.ext && f.buildSystemPrompt("中文").length > 40), "each share format has label/ext/prompt");
+    ok(!m.SHARE_FORMATS.slides, "slides format removed");
+    const htmlP = m.SHARE_FORMATS.html.buildSystemPrompt("中文");
+    ok(/HTML/.test(htmlP) && /svg-wrap/.test(htmlP) && /class="qa"/.test(htmlP) && /\[\[fig:/.test(htmlP), "html prompt uses the component system (svg-wrap/qa/fig)");
+    // embedFigures: placeholder → figure card, unresolved → dropped (never a raw token)
+    const emb = await m.embedFigures("见 [[fig:3]] 和 [[fig:9]]。", async (id) => (id === 3 ? "data:image/png;base64,AAA" : null));
+    ok(/<div class="paper-fig"><img src="data:image\/png;base64,AAA"/.test(emb), "embedFigures inserts a paper-fig card for resolved figures");
+    ok(!/\[\[fig:9\]\]/.test(emb) && !/\[\[fig:3\]\]/.test(emb), "embedFigures leaves no raw fig tokens");
+    const embThrow = await m.embedFigures("x [[fig:1]] y", async () => { throw new Error("no"); });
+    ok(!/\[\[fig:1\]\]/.test(embThrow), "embedFigures drops placeholder when resolver throws");
+    // svgFencesToInline: ```svg → inline <svg>, other fences untouched
+    const sv = m.svgFencesToInline("a\n```svg\n<svg viewBox='0 0 10 10'></svg>\n```\nb\n```js\nx=1\n```");
+    ok(/<svg viewBox/.test(sv) && !/```svg/.test(sv), "svgFencesToInline inlines svg fences");
+    ok(/```js/.test(sv), "svgFencesToInline leaves non-svg fences alone");
+    // wrapHtmlDoc: standalone doc with title + style
+    const doc2 = m.wrapHtmlDoc("My Paper", "<p>hi</p>");
+    ok(/^<!doctype html/i.test(doc2), "wrapHtmlDoc starts with doctype");
+    ok(/<title>My Paper<\/title>/.test(doc2) && /<style>/.test(doc2) && /<p>hi<\/p>/.test(doc2), "wrapHtmlDoc embeds title, style, and body");
+    ok(/&lt;script&gt;/.test(m.wrapHtmlDoc("<script>", "x")), "wrapHtmlDoc escapes the title");
+    // section-by-section HTML pipeline
+    ok(/JSON/.test(m.buildOutlinePrompt("中文")), "outline prompt asks for JSON");
+    const ol = m.parseOutline('```json\n{"title":"T","tldr":"one line","tags":["a","b"],"sections":[{"id":"s1","title":"背景","brief":"x"},{"id":"s2","title":"方法","brief":"y"}]}\n```');
+    ok(ol && ol.title === "T" && ol.sections.length === 2 && ol.sections[1].title === "方法", "parseOutline reads JSON (tolerates ``` fence)");
+    ok(m.parseOutline("not json at all") === null, "parseOutline returns null on junk");
+    ok(m.parseOutline('{"title":"x","sections":[]}') === null, "parseOutline rejects empty sections");
+    const secP = m.buildSectionPrompt("中文", { id: "s2", title: "方法", brief: "讲清楚" }, "[[fig:3]] 图：arch");
+    ok(/s2/.test(secP) && /方法/.test(secP) && /svg-wrap/.test(secP) && /\[\[fig:/.test(secP), "section prompt carries id/title/components/figlist");
+    ok(m.stripHtmlFence("```html\n<section>x</section>\n```") === "<section>x</section>", "stripHtmlFence unwraps a fenced section");
+    ok(/<header>/.test(m.buildHeaderHtml(ol)) && /class="tag"/.test(m.buildHeaderHtml(ol)), "buildHeaderHtml renders header + tags");
+    ok(/href="#s1"/.test(m.buildTocHtml(ol)) && /href="#s2"/.test(m.buildTocHtml(ol)), "buildTocHtml links each section");
+    const asm = m.assembleShareHtml(ol, ["<section id=\"s1\">A</section>", "<section id=\"s2\">B</section>"]);
+    ok(/<header>/.test(asm) && /class="toc"/.test(asm) && /id="s1"/.test(asm) && /id="s2"/.test(asm) && /<footer/.test(asm), "assembleShareHtml joins header+toc+sections+footer");
+  }
+
   // ---- reading skills ----
   ok(m.SKILLS.length === 8, "8 reading skills defined");
   ok(m.skillById("peer-review").label === "同行评审", "skillById resolves");
