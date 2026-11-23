@@ -8,4 +8,5 @@ export { htmlToText, decodeEntities, urlHost } from "../src/websearch";
 export { normS2, resolveId, fmtPaperList, lookupPaper, findReferences, relatedPapers } from "../src/scholar";
 export { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor } from "../src/skills";
 export { newerBundle } from "../src/persist";
+export { buildTranslatePrompt, translatableUnits, batchUnits, numberSegments, parseTranslations, interleaveBilingual, batchPayload, neighborContext } from "../src/translate";
 export { SHARE_FORMATS, shareFormatList, embedFigures, svgFencesToInline, wrapHtmlDoc, buildOutlinePrompt, parseOutline, buildSectionPrompt, buildHeaderHtml, buildTocHtml, stripHtmlFence, assembleShareHtml } from "../src/share";

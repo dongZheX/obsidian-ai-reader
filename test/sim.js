@@ -297,6 +297,41 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
     ok(/<header>/.test(asm) && /class="toc"/.test(asm) && /id="s1"/.test(asm) && /id="s2"/.test(asm) && /<footer/.test(asm), "assembleShareHtml joins header+toc+sections+footer");
   }
 
+  // ---- full-text bilingual translation ----
+  {
+    const tb = m.parseMarkdownBlocks("# Title\n\nThe model works well.\n\n## Method\n\nWe use a transformer.");
+    const units = m.translatableUnits(tb);
+    ok(units.length >= 3 && units.every((u, i) => u.n === i + 1), "translatableUnits numbers paragraphs+headings in order");
+    ok(units.some((u) => u.heading), "headings flagged");
+    const seg = m.numberSegments(units.slice(0, 2));
+    ok(/\[\[1\]\]/.test(seg) && /\[\[2\]\]/.test(seg), "numberSegments tags each unit");
+    // tolerant parse: multi-line translation runs until next [[n]]; extra prose ignored
+    const tr = m.parseTranslations("好的：\n[[1]] 标题\n[[2]] 模型\n效果很好\n[[3]] 方法");
+    ok(tr.get(1) === "标题" && tr.get(3) === "方法" && /模型/.test(tr.get(2)) && /效果很好/.test(tr.get(2)), "parseTranslations maps n→译文 (multi-line safe)");
+    const bi = m.interleaveBilingual("T", units, tr);
+    ok(/# T（双语对照）/.test(bi), "interleave adds bilingual title");
+    ok(/> /.test(bi), "interleave puts translation in a blockquote");
+    // missing translation → original kept, no crash
+    const bi2 = m.interleaveBilingual("T", units, new Map());
+    ok(bi2.includes(units[0].text) && !/> /.test(bi2), "interleave falls back to original-only when no translation");
+    // batching respects the char budget (each batch under budget unless one unit is huge)
+    const batches = m.batchUnits(units, 30);
+    ok(batches.length >= 2 && batches.flat().length === units.length, "batchUnits splits by budget, keeps all units");
+    ok(/翻译/.test(m.buildTranslatePrompt("中文")) && /\[\[n\]\]/.test(m.buildTranslatePrompt("中文")), "translate prompt states target + numbered format");
+    // context-aware batching: neighbor units become read-only 上文/下文
+    const manyBlocks = m.parseMarkdownBlocks(Array.from({ length: 8 }, (_, i) => "Para " + i + " has enough words here to matter.").join("\n\n"));
+    const mu = m.translatableUnits(manyBlocks);
+    const mb = m.batchUnits(mu, 60); // force several batches
+    ok(mb.length >= 3, "multiple batches formed");
+    const nc = m.neighborContext(mu, mb, 1, 2);
+    ok(nc.prev.length >= 1 && nc.next.length >= 1 && nc.prev[0].n < mb[1][0].n && nc.next[0].n > mb[1][mb[1].length - 1].n, "neighborContext picks units before/after the batch");
+    const pl = m.batchPayload(mb[1], nc.prev, nc.next);
+    ok(/上文（仅供理解，不要翻译）/.test(pl) && /下文（仅供理解，不要翻译）/.test(pl) && /待翻译/.test(pl), "batchPayload wraps context + translate sections");
+    ok(/\[\[/.test(pl.split("待翻译")[1]), "only the translate section carries [[n]] markers");
+    const first = m.batchPayload(mb[0], [], m.neighborContext(mu, mb, 0, 2).next);
+    ok(!/上文/.test(first), "first batch has no 上文 section");
+  }
+
   // ---- reading skills ----
   ok(m.SKILLS.length === 8, "8 reading skills defined");
   ok(m.skillById("peer-review").label === "同行评审", "skillById resolves");

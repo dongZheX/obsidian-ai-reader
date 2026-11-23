@@ -1,7 +1,7 @@
 {
   "id": "ai-reader",
   "name": "AI Reader",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.5.0",
   "description": "AI reading assistant for papers: grounded chat with click-to-source citations, AI highlights written into your notes, an agentic read-and-annotate pass, figure vision, selection explain/translate, and OpenAI/Anthropic APIs.",
   "author": "dongzhe05",

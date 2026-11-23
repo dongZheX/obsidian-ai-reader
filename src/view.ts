@@ -13,6 +13,7 @@ import { webSearch, webFetch } from "./websearch";
 import { lookupPaper, findReferences, relatedPapers } from "./scholar";
 import { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor, Preset } from "./skills";
 import { SHARE_FORMATS, ShareFormatId, ShareOutline, shareFormatList, buildOutlinePrompt, parseOutline, buildSectionPrompt, assembleShareHtml, stripHtmlFence, embedFigures, svgFencesToInline, wrapHtmlDoc } from "./share";
+import { buildTranslatePrompt, translatableUnits, batchUnits, numberSegments, parseTranslations, interleaveBilingual, batchPayload, neighborContext } from "./translate";
 
 export const VIEW_TYPE = "ai-reader-view";
 
@@ -37,15 +38,14 @@ export class AIReaderView extends ItemView {
   private modelMenu: HTMLElement | null = null;
   private modelList: string[] | null = null;
   private skillMenu: HTMLElement | null = null;
-  private shareBtn!: HTMLElement;
-  private shareMenu: HTMLElement | null = null;
+  private genBtn!: HTMLElement;
+  private optBtn!: HTMLElement;
+  private popMenu: HTMLElement | null = null;
 
   private source: SourceDoc | null = null;
   // Multi-paper comparison: a session-only "basket" of other notes to ask across.
   private basket: { path: string; title: string }[] = [];
   private multiMode = false;
-  private cmpBtn!: HTMLElement;
-  private multiBtn!: HTMLElement;
   private basketBarEl!: HTMLElement;
   streaming = false;
   cancel = false;
@@ -66,7 +66,7 @@ export class AIReaderView extends ItemView {
     this.registerEvent(this.app.workspace.on("file-open", () => this.refresh()));
     await this.refresh();
   }
-  async onClose() { this.closeModelMenu(); this.closeSkillMenu(); this.closeShareMenu(); }
+  async onClose() { this.closeModelMenu(); this.closeSkillMenu(); this.closePopMenu(); }
 
   // --------------------------------------------------------------- skeleton
   private buildSkeleton() {
@@ -78,27 +78,17 @@ export class AIReaderView extends ItemView {
     const agentBtn = top.createDiv({ cls: "air-top-btn air-top-agent", text: "✨ 通读并标注" });
     agentBtn.title = "让 AI 通读全文，自动按类别高亮+批注（可一键撤销）";
     agentBtn.onclick = () => this.agentAnnotate();
-    const deepBtn = top.createDiv({ cls: "air-top-btn air-deep", text: "深读 " + (this.plugin.deepRead ? "开" : "关") });
-    deepBtn.title = "深读模式：遍历所有章节、主动读图（更慢更贵）";
-    if (this.plugin.deepRead) deepBtn.addClass("air-deep-on");
-    deepBtn.onclick = () => { this.plugin.deepRead = !this.plugin.deepRead; deepBtn.setText("深读 " + (this.plugin.deepRead ? "开" : "关")); deepBtn.toggleClass("air-deep-on", this.plugin.deepRead); };
     this.skillBtn = top.createDiv({ cls: "air-top-btn air-skillbtn", text: "技能 ▾" });
     this.skillBtn.title = "选择阅读技能：切换方法与下方快捷按钮";
     this.skillBtn.onclick = (e) => { e.stopPropagation(); this.toggleSkillMenu(); };
-    const noteBtn = top.createDiv({ cls: "air-top-btn", text: "存为笔记" });
-    noteBtn.onclick = () => this.saveNote();
-    // one-click "share material" generator (one-pager / slides / HTML page)
-    this.shareBtn = top.createDiv({ cls: "air-top-btn air-sharebtn", text: "📄 分享 ▾" });
-    this.shareBtn.title = "把这篇论文一键生成可分享的材料";
-    this.shareBtn.onclick = (e) => { e.stopPropagation(); this.toggleShareMenu(); };
-    // multi-paper comparison: ➕ adds the current note to the basket; 跨论文 toggles
-    // cross-paper mode (questions answered across the basket).
-    this.cmpBtn = top.createDiv({ cls: "air-top-btn air-cmpbtn", text: "➕ 对比" });
-    this.cmpBtn.title = "把当前文档加入对比篮子（跨论文提问用）";
-    this.cmpBtn.onclick = () => this.basketToggle();
-    this.multiBtn = top.createDiv({ cls: "air-top-btn air-multibtn", text: "跨论文 关" });
-    this.multiBtn.title = "开启后，提问会跨对比篮子里的多篇文档综合/对比作答";
-    this.multiBtn.onclick = () => this.toggleMulti();
+    // Consolidated menus (keeps the row short): 生成 = export/produce actions,
+    // 选项 = toggles/modes. Individual buttons moved into these dropdowns.
+    this.genBtn = top.createDiv({ cls: "air-top-btn air-genbtn", text: "生成 ▾" });
+    this.genBtn.title = "存为笔记 / 一页总结 / HTML 分享页 / 全文翻译";
+    this.genBtn.onclick = (e) => { e.stopPropagation(); this.toggleGenMenu(); };
+    this.optBtn = top.createDiv({ cls: "air-top-btn air-optbtn", text: "选项 ▾" });
+    this.optBtn.title = "深读模式 / 对比篮子 / 跨论文提问";
+    this.optBtn.onclick = (e) => { e.stopPropagation(); this.toggleOptMenu(); };
     top.createDiv("air-spacer");
     const gear = top.createDiv({ cls: "air-gear", text: "⚙ 设置" });
     gear.title = "打开 AI Reader 设置";
@@ -167,23 +157,41 @@ export class AIReaderView extends ItemView {
   }
   private closeSkillMenu() { if (this.skillMenu) { const od = (this.skillMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.skillMenu.remove(); this.skillMenu = null; } }
 
-  // ---- share-material menu (一页总结 / 幻灯片 / HTML) ----
-  private toggleShareMenu() {
-    if (this.shareMenu) { this.closeShareMenu(); return; }
-    this.closeModelMenu(); this.closeSkillMenu();
+  // ---- consolidated 生成 / 选项 dropdowns ----
+  // Generic popup: items = {label, desc?, checked?, onClick}. One at a time.
+  private openPopMenu(anchor: HTMLElement, items: { label: string; desc?: string; checked?: boolean; onClick: () => void }[]) {
+    this.closePopMenu(); this.closeModelMenu(); this.closeSkillMenu();
     const menu = this.contentEl.createDiv("air-skillmenu air-sharemenu");
-    for (const f of shareFormatList()) {
-      const it = menu.createDiv({ cls: "air-skillitem" });
-      it.createDiv({ cls: "air-skillitem-t", text: f.label });
-      it.createDiv({ cls: "air-skillitem-d", text: f.desc });
-      it.onclick = (e) => { e.stopPropagation(); this.closeShareMenu(); this.generateShare(f.id); };
+    for (const it of items) {
+      const row = menu.createDiv({ cls: "air-skillitem" });
+      row.createDiv({ cls: "air-skillitem-t", text: (it.checked === undefined ? "" : (it.checked ? "☑ " : "☐ ")) + it.label });
+      if (it.desc) row.createDiv({ cls: "air-skillitem-d", text: it.desc });
+      row.onclick = (e) => { e.stopPropagation(); this.closePopMenu(); it.onClick(); };
     }
-    this.shareMenu = menu;
-    const onDoc = (ev: MouseEvent) => { if (this.shareMenu && !this.shareMenu.contains(ev.target as Node) && ev.target !== this.shareBtn) this.closeShareMenu(); };
-    (this.shareMenu as any)._onDoc = onDoc;
+    this.popMenu = menu;
+    const onDoc = (ev: MouseEvent) => { if (this.popMenu && !this.popMenu.contains(ev.target as Node) && ev.target !== anchor) this.closePopMenu(); };
+    (this.popMenu as any)._onDoc = onDoc;
     setTimeout(() => document.addEventListener("click", onDoc), 0);
   }
-  private closeShareMenu() { if (this.shareMenu) { const od = (this.shareMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.shareMenu.remove(); this.shareMenu = null; } }
+  private closePopMenu() { if (this.popMenu) { const od = (this.popMenu as any)._onDoc; if (od) document.removeEventListener("click", od); this.popMenu.remove(); this.popMenu = null; } }
+  private toggleGenMenu() {
+    if (this.popMenu) { this.closePopMenu(); return; }
+    this.openPopMenu(this.genBtn, [
+      { label: "存为笔记", desc: "把当前对话存为笔记", onClick: () => this.saveNote() },
+      { label: "一页总结", desc: SHARE_FORMATS.onepager.desc, onClick: () => this.generateShare("onepager") },
+      { label: "HTML 分享页", desc: SHARE_FORMATS.html.desc, onClick: () => this.generateShare("html") },
+      { label: "全文翻译", desc: "双语对照，生成一篇双语文档", onClick: () => this.runTranslate() },
+    ]);
+  }
+  private toggleOptMenu() {
+    if (this.popMenu) { this.closePopMenu(); return; }
+    const inBasket = !!(this.source && this.basket.some((p) => p.path === this.source!.path));
+    this.openPopMenu(this.optBtn, [
+      { label: "深读模式", desc: "遍历所有章节、主动读图（更慢更贵）", checked: !!this.plugin.deepRead, onClick: () => { this.plugin.deepRead = !this.plugin.deepRead; this.setStatus("深读模式：" + (this.plugin.deepRead ? "开" : "关"), "muted"); } },
+      { label: inBasket ? "移出对比篮子" : "加入对比篮子", desc: "把当前文档加入/移出跨论文对比", onClick: () => this.basketToggle() },
+      { label: "跨论文提问", desc: "提问跨对比篮子里的多篇文档综合作答", checked: this.multiMode, onClick: () => this.toggleMulti() },
+    ]);
+  }
 
   private setStatus(msg: string, kind?: string) { this.statusEl.setText(msg || ""); this.statusEl.className = "air-status" + (kind ? " air-status-" + kind : ""); }
   // Elapsed-seconds ticker for silent waits (prefill before the first token, the
@@ -230,7 +238,7 @@ export class AIReaderView extends ItemView {
     this.plugin.panels.set(res.file.path, this);
     this.setStatus("", "muted");
     await this.restoreChat();
-    this.updateCmpBtn(); this.renderBasket(); // reflect comparison-basket state for this doc
+    this.renderBasket(); // reflect comparison-basket state for this doc
   }
 
   private async restoreChat() {
@@ -583,20 +591,13 @@ export class AIReaderView extends ItemView {
     const i = this.basket.findIndex((p) => p.path === path);
     if (i >= 0) this.basket.splice(i, 1);
     else this.basket.push({ path, title: (this.source.file && this.source.file.basename) || "未命名" });
-    this.renderBasket(); this.updateCmpBtn();
-  }
-  private updateCmpBtn() {
-    if (!this.cmpBtn) return;
-    const inB = !!(this.source && this.basket.some((p) => p.path === this.source!.path));
-    this.cmpBtn.setText(inB ? "✓ 已加入" : "➕ 对比");
-    this.cmpBtn.toggleClass("air-cmpbtn-on", inB);
+    this.renderBasket();
+    this.setStatus(this.basket.some((p) => this.source && p.path === this.source.path) ? "已加入对比篮子。" : "已移出对比篮子。", "muted");
   }
   private toggleMulti() {
     this.multiMode = !this.multiMode;
-    this.multiBtn.setText("跨论文 " + (this.multiMode ? "开" : "关"));
-    this.multiBtn.toggleClass("air-multibtn-on", this.multiMode);
     const n = this.basketList().length;
-    if (this.multiMode && n < 2) this.setStatus("跨论文已开：用 ➕ 对比 把要对比的文档加入篮子（至少 2 篇）。", "muted");
+    if (this.multiMode && n < 2) this.setStatus("跨论文已开：在「选项 ▾ · 加入对比篮子」把要对比的文档加进来（至少 2 篇）。", "muted");
     else if (this.multiMode) this.setStatus("跨论文已开：提问将综合 " + n + " 篇文档。", "muted");
     else this.setStatus("跨论文已关。", "muted");
     this.renderBasket();
@@ -612,10 +613,10 @@ export class AIReaderView extends ItemView {
       chip.createSpan({ cls: "air-basket-chip-t", text: (p.title || "未命名").slice(0, 32) });
       const x = chip.createSpan({ cls: "air-basket-x", text: "✕" });
       x.title = "移除";
-      x.onclick = () => { const i = this.basket.findIndex((q) => q.path === p.path); if (i >= 0) this.basket.splice(i, 1); this.renderBasket(); this.updateCmpBtn(); };
+      x.onclick = () => { const i = this.basket.findIndex((q) => q.path === p.path); if (i >= 0) this.basket.splice(i, 1); this.renderBasket(); };
     }
     const clr = bar.createSpan({ cls: "air-basket-clear", text: "清空对比" });
-    clr.onclick = () => { this.basket = []; this.renderBasket(); this.updateCmpBtn(); };
+    clr.onclick = () => { this.basket = []; this.renderBasket(); };
   }
   // Blocks for any basket doc: current uses live blocks; others come from the
   // block store, else a fresh parse of the vault file (cached).
@@ -1054,7 +1055,11 @@ export class AIReaderView extends ItemView {
     try {
       const blocks = await this.ensureBlocks();
       if (fmt === "html") { await this.runHtmlShare(bubble, msg, blocks); this.setStatus("", ""); return; }
-      // one-pager: single streamed pass (readable Markdown).
+      // one-pager: single streamed pass (readable Markdown). Show a spinner +
+      // label while prefilling / streaming so it never looks like a dead box.
+      bubble.removeClass("air-streaming"); bubble.empty();
+      const waitRow = bubble.createDiv("air-share-wait"); waitRow.setText("正在生成一页总结…");
+      const contentEl = bubble.createDiv();
       let ctx = buildContextBounded(blocks, this.maxChars());
       try { const fd = await this.figureDigest(4); if (fd) ctx = fd + "——\n\n正文：\n" + ctx; } catch (e) {}
       const msgs: ChatMessage[] = [{ role: "system", content: spec.buildSystemPrompt(this.lang()) }, { role: "user", content: "论文内容：\n\n" + ctx }];
@@ -1063,11 +1068,11 @@ export class AIReaderView extends ItemView {
       const res = await this.plugin.llm.streamAnswer(msgs, null, (d) => {
         this.stopWait(); acc += d;
         const el = this.msgsEl; const stick = (el.scrollHeight - el.scrollTop - el.clientHeight) < 60;
-        bubble.setText(acc); this.setStatus("生成中… " + acc.length + " 字", "busy");
+        contentEl.setText(acc); this.setStatus("生成中… " + acc.length + " 字", "busy");
         if (stick) el.scrollTop = el.scrollHeight;
       }, () => this.cancel, meta);
       this.stopWait();
-      bubble.removeClass("air-streaming"); bubble.empty();
+      bubble.empty();
       await this.finishShareText(bubble, msg, fmt, (res.text || acc || "").trim());
       this.setStatus("", "");
     } catch (e: any) {
@@ -1126,6 +1131,84 @@ export class AIReaderView extends ItemView {
     const figs = (blocks || []).filter((b) => b.type === "image" || b.type === "table").slice(0, 20);
     if (!figs.length) return "（无）";
     return figs.map((b) => "[[fig:" + b.id + "]] " + (b.type === "table" ? "表" : "图") + "：" + ((b.text || "").slice(0, 60) || "(无标题)")).join("\n");
+  }
+
+  // ---------------------------------------------- full-text bilingual translate
+  // Translate the whole document paragraph-by-paragraph into a bilingual doc.
+  // Batched (fast calls + granular progress); saved as an in-vault Markdown file.
+  async runTranslate() {
+    if (!this.source) { new Notice("打开一篇笔记或 PDF 再翻译。"); return; }
+    if (!this.requireKey()) return;
+    if (this.streaming) return;
+    const { msg, bubble } = this.appendAssistant();
+    this.appendUser("🌐 全文翻译");
+    this.streaming = true; this.cancel = false; this.updateSendButton();
+    try {
+      const blocks = await this.ensureBlocks();
+      const units = translatableUnits(blocks);
+      if (!units.length) { bubble.setText("没有可翻译的正文段落。"); return; }
+      const target = this.lang();
+      const batches = batchUnits(units, 5000);
+      // Friendly progress: a determinate bar + "已翻译 X / 总 段（%）", advancing
+      // per batch, with the live char count on the status line.
+      bubble.empty();
+      const label = bubble.createDiv("air-trans-label");
+      const barOuter = bubble.createDiv("air-progress");
+      const barFill = barOuter.createDiv("air-progress-fill");
+      const limit = Math.max(1, Math.min(8, Number(this.plugin.settings.maxParallelTools) || 3));
+      let done = 0, started = 0, errors = 0;
+      const paint = () => { const pct = Math.round((done / units.length) * 100); barFill.style.width = pct + "%"; label.setText("翻译中… 已完成 " + done + " / " + units.length + " 段（" + pct + "%）· 并发 " + limit); };
+      paint();
+      const trans = new Map<number, string>();
+      // Bounded-concurrency pool: batches translate in parallel (order-independent
+      // — results keyed by segment number), progress advances as each completes.
+      let next = 0;
+      const worker = async () => {
+        while (!this.cancel) {
+          const i = next++; if (i >= batches.length) break;
+          try {
+            const { prev, next: nxt } = neighborContext(units, batches, i, 2);
+            const res = await this.plugin.llm.callLLM([{ role: "system", content: buildTranslatePrompt(target) }, { role: "user", content: batchPayload(batches[i], prev, nxt) }]);
+            for (const [n, t] of parseTranslations(res || "")) trans.set(n, t);
+          } catch (e) { errors++; }
+          done += batches[i].length; paint();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(limit, batches.length) }, () => worker()));
+      if (this.cancel) { bubble.empty(); bubble.setText("（已停止）"); return; }
+      const title = (this.source.file && this.source.file.basename) || "文档";
+      const md = interleaveBilingual(title, units, trans);
+      const translated = [...trans.keys()].length;
+      // Create the bilingual note via the vault API (registers the TFile so it
+      // opens reliably — adapter.write can lag the vault index) and open it.
+      let tfile: TFile | null = null;
+      try { tfile = await this.writeTransFile(title, md); } catch (e) { new Notice("保存双语文档失败：" + ((e as any)?.message || e)); }
+      bubble.empty();
+      bubble.createEl("div", { cls: "air-meta", text: "双语对照已生成（原文 " + units.length + " 段，已译 " + translated + " 段）" + (tfile ? "，已在右侧打开。" : "。") });
+      if (tfile) { try { await this.app.workspace.getLeaf(true).openFile(tfile); } catch (e) {} }
+      const row = msg.createDiv("air-actions");
+      if (tfile) { const open = row.createSpan({ cls: "air-action", text: "在 Obsidian 打开" }); open.onclick = async () => { if (tfile) await this.app.workspace.getLeaf(true).openFile(tfile); }; }
+      const copy = row.createSpan({ cls: "air-action", text: "复制" });
+      copy.onclick = () => { navigator.clipboard.writeText(md); copy.setText("已复制"); setTimeout(() => copy.setText("复制"), 1200); };
+      this.setStatus(tfile ? "已保存：" + tfile.path : "", "ok");
+    } catch (e: any) {
+      bubble.setText(this.cancel ? "（已停止）" : this.plugin.llm.friendlyError(e));
+    } finally { this.stopWait(); this.streaming = false; this.updateSendButton(); this.setStatus("", ""); }
+  }
+  private transRel(title: string): string {
+    const base = (title || "doc").replace(/[\\/:*?"<>|]+/g, "_");
+    return "AI Reader/translations/" + base + ".双语.md";
+  }
+  // Write via the vault API so the TFile is indexed immediately (and returned),
+  // then it opens reliably. Creating folders through the vault too.
+  private async writeTransFile(title: string, content: string): Promise<TFile> {
+    for (const dir of ["AI Reader", "AI Reader/translations"]) {
+      if (!this.app.vault.getAbstractFileByPath(dir)) { try { await this.app.vault.createFolder(dir); } catch (e) { /* exists */ } }
+    }
+    const rel = this.transRel(title);
+    const existing = this.app.vault.getAbstractFileByPath(rel);
+    if (existing instanceof TFile) { await this.app.vault.modify(existing, content); return existing; }
+    return await this.app.vault.create(rel, content);
   }
 
   // one-pager / slides: render as markdown + offer "保存到文件".
