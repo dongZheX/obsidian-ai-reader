@@ -10,3 +10,4 @@ export { SKILLS, COMMON_PRESETS, skillById, skillDirective, chipsFor } from "../
 export { newerBundle } from "../src/persist";
 export { buildTranslatePrompt, translatableUnits, batchUnits, numberSegments, parseTranslations, interleaveBilingual, batchPayload, neighborContext } from "../src/translate";
 export { SHARE_FORMATS, shareFormatList, embedFigures, svgFencesToInline, wrapHtmlDoc, buildOutlinePrompt, parseOutline, buildSectionPrompt, buildHeaderHtml, buildTocHtml, stripHtmlFence, assembleShareHtml } from "../src/share";
+export { retryAfterMs, rateBackoffMs, RATE_STATUS } from "../src/net";

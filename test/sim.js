@@ -351,6 +351,17 @@ function eq(a, b, msg) { ok(JSON.stringify(a) === JSON.stringify(b), msg + "  (g
   ok(/自定义要求/.test(new m.LLM(() => Object.assign({}, m.DEFAULT_SETTINGS, { customPrompt: "多用例子" })).systemPrompt("X", "中文")), "custom prompt injected into system prompt");
   ok(!/自定义要求/.test(new m.LLM(() => m.DEFAULT_SETTINGS).systemPrompt("X", "中文")), "no custom-prompt block when empty");
 
+  // ---- HTTP retry: Retry-After parsing + rate-limit backoff ----
+  eq(m.retryAfterMs({ "retry-after": "2" }), 2000, "retryAfterMs: delta-seconds -> ms");
+  eq(m.retryAfterMs({ "Retry-After": "5" }), 5000, "retryAfterMs: case-insensitive header");
+  eq(m.retryAfterMs({ "retry-after": "99999" }), 30000, "retryAfterMs: clamps huge value to 30s");
+  eq(m.retryAfterMs({}), null, "retryAfterMs: null when header absent");
+  eq(m.retryAfterMs(undefined), null, "retryAfterMs: null when no headers");
+  eq(m.rateBackoffMs(0, { "retry-after": "3" }), 3000, "rateBackoffMs: honors Retry-After over backoff");
+  ok(m.rateBackoffMs(0) >= 1500 && m.rateBackoffMs(0) < 2000, "rateBackoffMs: attempt 0 ≈1.5s + jitter");
+  ok(m.rateBackoffMs(10) <= 20500, "rateBackoffMs: exponential capped at 20s (+jitter)");
+  ok(m.RATE_STATUS.has(429) && m.RATE_STATUS.has(503) && m.RATE_STATUS.has(529) && !m.RATE_STATUS.has(500), "RATE_STATUS is 429/503/529 only");
+
   console.log("");
   if (fails) { console.error(fails + " FAILED"); process.exit(1); }
   console.log("ALL OK");
